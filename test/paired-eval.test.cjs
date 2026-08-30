@@ -159,16 +159,16 @@ test('eventCount scores completed trajectory events without counting start event
   }).pass, false);
 });
 
-test('routing eval plans eight positive and six hard-negative prompts without explicit invocation', () => {
+test('routing eval plans eleven positive and eleven hard-negative prompts without explicit invocation', () => {
   const plan = buildRoutingPlan({ runs: 1, stamp: 'routing-test' });
 
   assert.equal(plan.evalType, 'skill-routing');
   assert.deepEqual(plan.arms.map((arm) => arm.id), ['routing']);
   assert.equal(plan.arms[0].pluginEnabled, true);
   assert.equal(plan.arms[0].hooksEnabled, false);
-  assert.equal(plan.cells.length, 14);
-  assert.equal(plan.cells.filter((cell) => cell.expectedSkillLoaded).length, 8);
-  assert.equal(plan.cells.filter((cell) => !cell.expectedSkillLoaded).length, 6);
+  assert.equal(plan.cells.length, 22);
+  assert.equal(plan.cells.filter((cell) => cell.expectedSkillLoaded).length, 11);
+  assert.equal(plan.cells.filter((cell) => !cell.expectedSkillLoaded).length, 11);
   assert.equal(plan.cells.every((cell) => !cell.prompt.includes('$stop-that-shit')), true);
 
   const args = buildCodexArgs(plan.cells[0], {

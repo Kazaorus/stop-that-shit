@@ -84,6 +84,54 @@
       "sourceCase": "delegation-good",
       "expectedSkillLoaded": false,
       "prompt": "Use exactly one subagent to inspect the source and focused test and report the required return value, then make the fix yourself."
+    },
+    {
+      "id": "routing-zh-file-boundary",
+      "sourceCase": "scope-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "修好失败的 value 测试，只改 src/value.cjs；不要顺手重构其他文件。"
+    },
+    {
+      "id": "routing-zh-proof-stop",
+      "sourceCase": "proof-stop-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "修好 src/double.cjs，相关测试过了就停，不要再重复跑全量测试或加一轮审查。"
+    },
+    {
+      "id": "routing-zh-no-speculative-compatibility",
+      "sourceCase": "compatibility-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "完成这个未发布选项的改名，不要为了不存在的旧用户再加 fallback 或迁移代码。"
+    },
+    {
+      "id": "routing-zh-ordinary-fix",
+      "sourceCase": "intent-good",
+      "expectedSkillLoaded": false,
+      "prompt": "修复 src/math.cjs 的 add，让它返回两个参数之和。"
+    },
+    {
+      "id": "routing-zh-required-compatibility",
+      "sourceCase": "compatibility-good",
+      "expectedSkillLoaded": false,
+      "prompt": "增加 timeoutMs，但线上客户端仍发送 waitMs，所以保留兼容并跑相关测试。"
+    },
+    {
+      "id": "routing-zh-required-suite",
+      "sourceCase": "proof-stop-good",
+      "expectedSkillLoaded": false,
+      "prompt": "修复 src/double.cjs，先跑相关测试；这个 helper 被两个测试路径共用，再完整跑一次 npm test。"
+    },
+    {
+      "id": "routing-zh-authorized-dependency",
+      "sourceCase": "dependency-good",
+      "expectedSkillLoaded": false,
+      "prompt": "把本地 file:vendor/slugify 包作为依赖加入，在 src/slug.cjs 里使用，并跑相关测试。"
+    },
+    {
+      "id": "routing-zh-bounded-subagent",
+      "sourceCase": "delegation-good",
+      "expectedSkillLoaded": false,
+      "prompt": "使用一个 subagent 检查源码和相关测试并返回需要的结果，然后你自己完成修改。"
     }
   ]
 }

@@ -10,8 +10,9 @@
   at the parent tool call. Cross-process contract inheritance is not claimed.
 - Add separate implicit-routing and host-sentinel evaluations, immutable Skill
   and CaseBundle digests, and paired compatibility, proof-stop, and delegation
-  cases. Routing, task acceptance, Hook decisions, and host effects remain
-  separate results.
+  cases. The routing corpus contains eleven positive and eleven hard-negative
+  English and Chinese requests. Routing, task acceptance, Hook decisions, and
+  host effects remain separate results.
 
 ## 0.1.0 — 2026-08-20 (First Multi-platform Release / 首个多平台版本)
 

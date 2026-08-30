@@ -102,7 +102,7 @@ Inspect the separate implicit-routing corpus without starting Codex:
 npm run eval:routing -- --dry-run
 ```
 
-This corpus contains eight positive and six hard-negative requests. It enables
+This corpus contains eleven positive and eleven hard-negative requests. It enables
 plugin discovery, disables Hooks, does not invoke `$stop-that-shit`, and does
 not inject the Skill body. The scorer observes whether Codex read the installed
 `SKILL.md` and verifies that content against the planned Skill digest. It
@@ -175,7 +175,7 @@ Start paid sessions only with `--run`:
 ```powershell
 npm run eval:paired -- --run --runs 1 --case intent --model gpt-5.6-luna --reasoning medium --max-cells 6
 npm run eval:paired -- --run --model gpt-5.6-luna --reasoning medium --max-cells 144
-npm run eval:routing -- --run --model gpt-5.6-luna --reasoning medium --max-cells 14
+npm run eval:routing -- --run --model gpt-5.6-luna --reasoning medium --max-cells 22
 npm run eval:host-sentinel -- --run --model gpt-5.6-luna --reasoning medium --max-cells 2
 ```
 
