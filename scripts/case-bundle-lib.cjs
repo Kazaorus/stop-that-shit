@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const validateCaseBundleManifest = require('./generated/case-bundle-v1-validator.cjs');
 
 const AGENT_INSTRUCTION_FILES = new Set(['AGENTS.md', 'AGENTS.override.md']);
@@ -25,6 +26,28 @@ function inspectTree(directory) {
     if (stat.isSymbolicLink()) throw new Error(`symbolic link is not allowed in a CaseBundle: ${entry.name}`);
     if (stat.isDirectory()) inspectTree(target);
   }
+}
+
+function caseBundleDigest(directory) {
+  const root = path.resolve(directory);
+  const files = [];
+  function visit(current, relative = '') {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const nextRelative = path.join(relative, entry.name);
+      const target = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(target, nextRelative);
+      else if (entry.isFile()) files.push(nextRelative.replace(/\\/g, '/'));
+    }
+  }
+  visit(root);
+  const digest = crypto.createHash('sha256');
+  for (const relative of files.sort()) {
+    digest.update(relative, 'utf8');
+    digest.update('\0');
+    digest.update(fs.readFileSync(path.join(root, ...relative.split('/'))));
+    digest.update('\0');
+  }
+  return digest.digest('hex');
 }
 
 function validateAcceptancePaths(check, field) {
@@ -110,6 +133,7 @@ function validateCaseBundle(directory) {
     title: manifest.title,
     provenance: manifest.provenance,
     privacyReview: manifest.privacyReview,
+    digest: caseBundleDigest(bundleDirectory),
     directory: bundleDirectory,
     cases: [
       validateVariant(bundleDirectory, manifest.id, 'bad', variants.bad),
@@ -136,4 +160,4 @@ function loadCaseBundles(root = path.resolve(__dirname, '..'), caseDirectories =
   return bundles;
 }
 
-module.exports = { loadCaseBundles, validateCaseBundle };
+module.exports = { caseBundleDigest, loadCaseBundles, validateCaseBundle };

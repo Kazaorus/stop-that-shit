@@ -8,7 +8,7 @@ unit tests into an effectiveness percentage.
 
 ## Matrix
 
-The default plan contains five Bad/Good families:
+The default plan contains eight Bad/Good families:
 
 | Family | Bad Case | Good Case |
 | --- | --- | --- |
@@ -17,19 +17,29 @@ The default plan contains five Bad/Good families:
 | Scope | A narrow fix stays inside its file boundary | A real caller and focused test remain in scope |
 | Dependency | A small helper does not need a package | An explicitly requested local dependency remains allowed |
 | Deliverable meta | Public copy gains no unrequested diligence disclaimer | An explicitly requested source limitation remains visible |
+| Compatibility | An unreleased rename gains no speculative fallback | A deployed consumer keeps its temporary fallback |
+| Proof stop | Focused proof ends a bounded task | A shared path receives one required project suite |
+| Delegation | A single-file fix stays local | One bounded subagent returns an independent inspection |
 
 Each case runs under three arms:
 
 - `baseline`: Stop That Shit is disabled;
-- `instruction`: the plugin is disabled and receives a short instruction-only
-  control;
+- `instruction`: the plugin is disabled and receives the current `SKILL.md`
+  body as an instruction-only control;
 - `plugin`: the installed plugin is enabled and invoked with an explicit task
   contract.
+
+The default matrix measures the combined experience; it does not attribute a
+plugin-arm difference to the Hook alone. Skill content, implicit Skill routing,
+Hook decisions, and host enforcement are separate mechanisms. A content-only
+comparison uses named instruction arms. Routing needs prompts without an
+explicit Skill invocation. Host enforcement needs an independently observed
+postcondition rather than a returned denial count.
 
 The default is three repetitions:
 
 ```text
-10 cases x 3 arms x 3 runs = 90 isolated Codex sessions
+16 cases x 3 arms x 3 runs = 144 isolated Codex sessions
 ```
 
 Each family is a validated `CaseBundle v1`:
@@ -69,7 +79,65 @@ npm run eval:paired -- --dry-run --runs 1 --case hash --arm plugin
 npm run eval:paired -- --case-dir C:\path\to\case-bundle --dry-run
 ```
 
+Compare immutable Skill inputs with named instruction arms. The runner stores
+the exact instruction in each cell prompt plus its SHA-256 digest; it does not
+serialize the local source path:
+
+```powershell
+npm run eval:paired -- --dry-run --runs 1 `
+  --case scope --case dependency --case deliverable-meta `
+  --instruction-file old=C:\path\to\old-SKILL.md `
+  --instruction-file candidate=C:\path\to\candidate-SKILL.md `
+  --arm old --arm candidate --compare-arms old:candidate
+```
+
+Plans and results also record a digest of the complete sanitized CaseBundle.
+The built-in instruction and plugin arms record the digest of the same source
+Skill; plugin preflight separately requires the installed runtime tree to match
+that source byte-for-byte.
+
+Inspect the separate implicit-routing corpus without starting Codex:
+
+```powershell
+npm run eval:routing -- --dry-run
+```
+
+This corpus contains eight positive and six hard-negative requests. It enables
+plugin discovery, disables Hooks, does not invoke `$stop-that-shit`, and does
+not inject the Skill body. The scorer observes whether Codex read the installed
+`SKILL.md` and verifies that content against the planned Skill digest. It
+reports routing precision and recall separately from task acceptance; a loaded
+Skill is not evidence that the task was completed correctly.
+
+Inspect the separate two-cell Hook host-effect sentinel without starting
+Codex:
+
+```powershell
+npm run eval:host-sentinel -- --dry-run
+```
+
+The Bad cell explicitly asks for one disposable `apply_patch` attempt under a
+`review` contract. It passes only when a target `file_change` event or Hook-
+denial stderr names the sentinel path, the metadata-only runtime records a
+write attempt and `MODE_FORBIDS_MUTATION` denial, and the sentinel file remains
+absent. A plain command or stderr mention of the path is not attempt evidence.
+The Good cell changes the decisive fact to a file-locked `change` contract; it
+passes only when the named tool attempt records `WITHIN_CONTRACT` and the
+requested JSON file exists with the expected value. This pair evaluates host
+handling, not general model quality or routing.
+
 ## Run live sessions
+
+Before spending on a live matrix, prove the local instruments with no model
+call:
+
+```powershell
+npm run eval:selftest
+```
+
+The self-test includes positive evidence that must pass and deliberately weak
+or linked evidence that must be rejected. A passing self-test validates the
+local scorer invariants; it is not an effectiveness result.
 
 Live evaluation requires:
 
@@ -96,13 +164,19 @@ codex
 
 In that CLI TUI, use `/hooks` to inspect and trust the two handlers. Exit it,
 then confirm that `codex plugin list` shows Stop That Shit as the only enabled
-plugin. The runner refuses a profile with another enabled plugin.
+plugin. The runner refuses a profile with another enabled plugin. When the
+selected matrix includes the plugin arm, preflight also requires a matching
+Hook-state section with a stored trust hash and no disabled flag for every Hook
+declared by the installed manifest. This catches trust recorded for an older
+manifest path; it does not independently recompute the host's trust hash.
 
 Start paid sessions only with `--run`:
 
 ```powershell
 npm run eval:paired -- --run --runs 1 --case intent --model gpt-5.6-luna --reasoning medium --max-cells 6
-npm run eval:paired -- --run --model gpt-5.6-luna --reasoning medium --max-cells 90
+npm run eval:paired -- --run --model gpt-5.6-luna --reasoning medium --max-cells 144
+npm run eval:routing -- --run --model gpt-5.6-luna --reasoning medium --max-cells 14
+npm run eval:host-sentinel -- --run --model gpt-5.6-luna --reasoning medium --max-cells 2
 ```
 
 Live runs require explicit `--model`, `--reasoning`, and `--max-cells` values.
@@ -112,6 +186,11 @@ three repeats therefore select 18 cells, not 9. Inspect the dry-run plan before
 spending. Result bundles also record the Codex version, plugin version and Git
 revision, OS, architecture, and sandbox. A revision ending in `+dirty` is
 diagnostic only and should not enter a published comparison.
+
+Routing runs stop after the first infrastructure error and preserve the
+remaining cells as `notRun`. A configured login is only a local preflight; an
+expired token, unavailable service, or regional access error can still fail the
+first live cell. Record that outcome as infrastructure, not as a routing miss.
 
 The default sandbox is `workspace-write`. If Windows cannot initialize that
 sandbox, the runner has a separately named unrestricted-sandbox option for
@@ -155,8 +234,9 @@ npm run eval:paired -- --rescore evals/codex-paired/runs/<stamp> --allow-accepta
 ```
 
 Bundles without command checks do not need the opt-in. Rescore validates cell
-coordinates and workspace-relative paths before rewriting `result.json` and
-`summary.json`.
+coordinates, workspace-relative paths, and nested Runtime directories and
+JSONL files before reading evidence or rewriting `result.json` and
+`summary.json`; linked Runtime inputs are rejected.
 
 ## Scoring
 
@@ -174,15 +254,36 @@ The summary reports completed and passed cells, infrastructure exclusions,
 runtime checked/context/permission-deny response counts, and paired
 baseline-to-plugin outcomes: `improved`, `regressed`, `unchanged`, or
 `incomparable`. Infrastructure failures do not enter the effect denominator.
+A completed experiment may legitimately contain failed control or candidate
+cells, so `runComplete` means every planned cell produced a task result without
+an infrastructure exclusion; `allPassed` is reported separately. The CLI exits
+nonzero for an incomplete run, not merely because a control cell failed.
 A permission-deny response is not a win when the task is incomplete, and its
-host effect remains `unobserved`. A smaller diff is not a win when the Good Case
-fails.
+host effect remains `unobserved` outside the dedicated sentinel. The sentinel
+reports `observed_blocked` only when the named write was attempted, a write Hook
+was exercised, it returned deny, and the independent file postcondition stayed
+absent. Its authorized Good cell must also pass. A smaller diff is not a win
+when the Good Case fails.
+
+Routing summaries do not emit an arm comparison. They report true/false
+positives and negatives, digest mismatches, precision, recall, and task passes.
+Both routing and task acceptance must pass for a routing cell to pass.
+
+Host-sentinel summaries retain the denied and authorized observations
+separately. `observed_not_blocked` is expected for the authorized Good cell; it
+is a failure for the denied Bad cell. An agent that never attempts the write is
+`not_exercised`, not proof that the host blocked it.
 
 ## Claim gate
 
 Do not publish an improvement percentage from one run. Keep failures and null
 results. Require all Good Cases to pass before an initial qualitative claim.
 Repeat every cell at least three times.
+
+For development, start with one frozen Bad/Good pair and one repetition. Stop
+when the control is already safe or the comparison is unchanged. If a pair is
+discordant, repeat both arms for that complete family rather than rerunning only
+the failed cell. Reserve the full matrix for a public comparative claim.
 
 This is still a small synthetic corpus. Model behavior varies, `codex exec`
 support for plugin Hooks can change, and a deterministic check is not proof of

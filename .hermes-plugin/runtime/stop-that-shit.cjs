@@ -822,7 +822,10 @@ module.exports = {
     "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
+    "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
     "eval:paired": "node scripts/run-paired-eval.cjs",
+    "eval:routing": "node scripts/run-paired-eval.cjs --routing --runs 1",
+    "eval:host-sentinel": "node scripts/run-paired-eval.cjs --host-sentinel --runs 1",
     "release:check": "npm run schema:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs"
   },
@@ -1431,7 +1434,10 @@ __modules["package.json"] = function(module) { module.exports = {
     "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
+    "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
     "eval:paired": "node scripts/run-paired-eval.cjs",
+    "eval:routing": "node scripts/run-paired-eval.cjs --routing --runs 1",
+    "eval:host-sentinel": "node scripts/run-paired-eval.cjs --host-sentinel --runs 1",
     "release:check": "npm run schema:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs"
   },

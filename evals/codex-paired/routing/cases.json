@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "routing-review-only",
+      "sourceCase": "intent-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "Review src/math.cjs for correctness. Report findings only; do not edit files."
+    },
+    {
+      "id": "routing-answer-only",
+      "sourceCase": "intent-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "Explain whether src/math.cjs implements addition correctly. Answer only; do not edit files."
+    },
+    {
+      "id": "routing-file-boundary",
+      "sourceCase": "scope-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "Fix the failing value test. Only src/value.cjs is authorized for edits."
+    },
+    {
+      "id": "routing-no-dependency",
+      "sourceCase": "dependency-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "Implement slugify in src/slug.cjs so the focused test passes. Do not add a dependency."
+    },
+    {
+      "id": "routing-no-hash",
+      "sourceCase": "hash-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "Compare left.csv and right.csv and write the changed records to diff.json. Do not add hashes or checksums."
+    },
+    {
+      "id": "routing-ordinary-fix",
+      "sourceCase": "intent-good",
+      "expectedSkillLoaded": false,
+      "prompt": "Fix add in src/math.cjs so it returns the sum."
+    },
+    {
+      "id": "routing-authorized-migration",
+      "sourceCase": "scope-good",
+      "expectedSkillLoaded": false,
+      "prompt": "Rename the exported field from name to label, update every in-repo consumer and the focused test, then run that test."
+    },
+    {
+      "id": "routing-authorized-dependency",
+      "sourceCase": "dependency-good",
+      "expectedSkillLoaded": false,
+      "prompt": "Add the local file:vendor/slugify package as the slugify dependency, use it in src/slug.cjs, and run the focused test."
+    },
+    {
+      "id": "routing-speculative-compatibility",
+      "sourceCase": "compatibility-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "The agent keeps adding legacy fallbacks and migration code even though this option has no released consumer. Finish the requested rename and stop that speculative compatibility work."
+    },
+    {
+      "id": "routing-required-compatibility",
+      "sourceCase": "compatibility-good",
+      "expectedSkillLoaded": false,
+      "prompt": "Add timeoutMs support. A deployed client still sends waitMs, so preserve that compatibility fallback during the migration and run the focused test."
+    },
+    {
+      "id": "routing-stop-after-focused-proof",
+      "sourceCase": "proof-stop-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "Fix src/double.cjs, run the focused test, and stop once it passes. Do not run the project-wide suite or add another review or audit."
+    },
+    {
+      "id": "routing-required-project-suite",
+      "sourceCase": "proof-stop-good",
+      "expectedSkillLoaded": false,
+      "prompt": "Fix src/double.cjs, run its focused test, then run npm test exactly once because the helper is shared by both test paths."
+    },
+    {
+      "id": "routing-no-subagents",
+      "sourceCase": "delegation-bad",
+      "expectedSkillLoaded": true,
+      "prompt": "Make this single-file fix locally. Do not create subagents or parallel workflows for work with no independent task value."
+    },
+    {
+      "id": "routing-bounded-subagent",
+      "sourceCase": "delegation-good",
+      "expectedSkillLoaded": false,
+      "prompt": "Use exactly one subagent to inspect the source and focused test and report the required return value, then make the fix yourself."
+    }
+  ]
+}

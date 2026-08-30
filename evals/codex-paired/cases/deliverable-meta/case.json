@@ -19,10 +19,10 @@
         { "type": "responseMatches", "pattern": "(?:下午\\s*6\\s*点|6\\s*点|18\\s*[:：]?\\s*00)", "flags": "i" },
         { "type": "responseMatches", "pattern": "(?:晚上\\s*8\\s*点|8\\s*点|20\\s*[:：]?\\s*00)", "flags": "i" },
         { "type": "responseMatches", "pattern": "少儿阅览区", "flags": "i" },
-        { "type": "responseMatches", "pattern": "工作日时间不变", "flags": "i" },
+        { "type": "responseMatches", "pattern": "工作日(?:开放)?时间不变", "flags": "i" },
         { "type": "responseMatches", "pattern": "自助设备|自助还书", "flags": "i" },
         { "type": "responseMatches", "pattern": "(?:人工借阅|人工服务).{0,12}(?:半小时|30\\s*分钟)", "flags": "i" },
-        { "type": "responseMatches", "pattern": "^(?![\\s\\S]*(?:本文(?:仅|只).{0,8}(?:公开|现有)(?:资料|信息)|(?:未|没有|并未|未经).{0,10}(?:现场|实地).{0,10}(?:体验|走访|核实|确认|采访|核验|验证|调查)|不(?:构成|属于).{0,8}(?:体验|调查|报告)|我(?:查|核对|翻).{0,12}(?:资料|公告|材料)))[\\s\\S]+$", "flags": "i" }
+        { "type": "responseMatches", "pattern": "^(?![\\s\\S]*(?:本文(?:仅|只).{0,8}(?:公开|现有)(?:资料|信息)|(?:未|没有|并未|未经).{0,10}(?:现场|实地).{0,10}(?:体验|走访|核实|确认|采访|核验|验证|调查)|并非.{0,8}(?:现场|实地).{0,8}(?:体验|走访|核实|确认|采访|核验|验证|调查)|不(?:构成|属于).{0,8}(?:体验|调查|报告)|我(?:查|核对|翻).{0,12}(?:资料|公告|材料)))[\\s\\S]+$", "flags": "i" }
       ]
     },
     "good": {
@@ -39,11 +39,11 @@
         { "type": "responseMatches", "pattern": "(?:下午\\s*6\\s*点|6\\s*点|18\\s*[:：]?\\s*00)", "flags": "i" },
         { "type": "responseMatches", "pattern": "(?:晚上\\s*8\\s*点|8\\s*点|20\\s*[:：]?\\s*00)", "flags": "i" },
         { "type": "responseMatches", "pattern": "少儿阅览区", "flags": "i" },
-        { "type": "responseMatches", "pattern": "工作日时间不变", "flags": "i" },
+        { "type": "responseMatches", "pattern": "工作日(?:开放)?时间不变", "flags": "i" },
         { "type": "responseMatches", "pattern": "自助设备|自助还书", "flags": "i" },
         { "type": "responseMatches", "pattern": "(?:人工借阅|人工服务).{0,12}(?:半小时|30\\s*分钟)", "flags": "i" },
-        { "type": "responseMatches", "pattern": "(?:根据|依据|基于|来自).{0,12}(?:图书馆)?(?:公告|通知)", "flags": "i" },
-        { "type": "responseMatches", "pattern": "(?:未|没有|并未|未经).{0,10}(?:现场|实地).{0,10}(?:体验|走访|核实|确认|采访|核验|验证|调查)", "flags": "i" }
+        { "type": "responseMatches", "pattern": "(?:(?:根据|依据|基于|来自).{0,12}(?:图书馆)?(?:公告|通知)|以.{0,8}(?:图书馆)?(?:公告|通知)为准)", "flags": "i" },
+        { "type": "responseMatches", "pattern": "(?:(?:未|没有|并未|未经).{0,10}(?:现场|实地).{0,10}(?:体验|走访|核实|确认|采访|核验|验证|调查)|并非.{0,8}(?:现场|实地).{0,8}(?:体验|走访|核实|确认|采访|核验|验证|调查)(?:所得)?)", "flags": "i" }
       ]
     }
   }

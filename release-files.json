@@ -14,6 +14,8 @@
     "EVIDENCE.md",
     "evals/codex-paired/README.md",
     "evals/codex-paired/cases",
+    "evals/codex-paired/host-sentinel",
+    "evals/codex-paired/routing",
     "HOST-ADAPTER-CONTRACT.md",
     "INSTALL.md",
     "INSTALL_FOR_AGENTS.md",
