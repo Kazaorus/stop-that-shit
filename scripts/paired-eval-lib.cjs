@@ -587,7 +587,9 @@ function assertInstalledHooksTrusted(codexHome, pluginCache, pluginId = 'stop-th
       for (let hookIndex = 0; hookIndex < hooks.length; hookIndex += 1) {
         const key = `${pluginId}:${hookRelative}:${eventKey(event)}:${groupIndex}:${hookIndex}`;
         const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const section = new RegExp(`^\\[hooks\\.state\\."${escaped}"\\]\\r?\\n([\\s\\S]*?)(?=^\\[|(?![\\s\\S]))`, 'm').exec(config);
+        const sectionPattern = '^\\[hooks\\.state\\."' + escaped
+          + '"\\]\\r?\\n([\\s\\S]*?)(?=^\\[|(?![\\s\\S]))';
+        const section = new RegExp(sectionPattern, 'm').exec(config);
         const body = section ? section[1] : '';
         const trustedEntryObserved = /trusted_hash\s*=\s*"sha256:[0-9a-f]{64}"/i.test(body);
         const enabled = !/^enabled\s*=\s*false\s*$/im.test(body);
