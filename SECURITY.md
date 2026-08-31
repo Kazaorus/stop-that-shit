@@ -7,15 +7,16 @@ untrusted Hook definitions, host bugs, or direct user actions may bypass it.
 
 ## Supported version
 
-`0.1.0` is the first multi-platform release in the pre-1.0 line. Security and
+`0.1.1` is the current multi-platform release in the pre-1.0 line. Security and
 compatibility support remain best effort.
 
 ## Reporting a vulnerability
 
 Do not put secrets, private transcripts, or exploit details in a public issue.
-Before public release, the repository owner must enable GitHub private
-vulnerability reporting. Until a private channel exists, submit only a
-sanitized issue that asks the maintainer to establish private contact.
+GitHub private vulnerability reporting is enabled for this repository. Use the
+[private security advisory form][private-report] for sensitive reports.
+
+[private-report]: https://github.com/lennney/stop-that-shit/security/advisories/new
 
 Useful reports identify the affected revision, host surface and version, Hook
 trust state, minimal reproduction, expected boundary, and observed result.

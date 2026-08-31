@@ -781,7 +781,7 @@ module.exports = { readRuntime, recordDecision };
 "package.json": function(module, exports, __require) {
 module.exports = {
   "name": "stop-that-shit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Stop unneeded scope, subagents, dependencies, and hashes in Codex, Claude Code, OpenCode, Hermes Agent CLI, and Pi tasks",
   "keywords": [
@@ -825,7 +825,7 @@ module.exports = {
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
     "eval:paired": "node scripts/run-paired-eval.cjs",
     "eval:routing": "node scripts/run-paired-eval.cjs --routing --runs 1",
-    "eval:host-sentinel": "node scripts/run-paired-eval.cjs --host-sentinel --runs 1",
+    "eval:host-smoke": "node scripts/run-paired-eval.cjs --host-smoke --runs 1",
     "release:check": "npm run schema:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs"
   },
@@ -1393,7 +1393,7 @@ module.exports = { classifyCodexTool, classifyShell, detectDependencyIntent, det
 };
 __modules["package.json"] = function(module) { module.exports = {
   "name": "stop-that-shit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Stop unneeded scope, subagents, dependencies, and hashes in Codex, Claude Code, OpenCode, Hermes Agent CLI, and Pi tasks",
   "keywords": [
@@ -1437,7 +1437,7 @@ __modules["package.json"] = function(module) { module.exports = {
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
     "eval:paired": "node scripts/run-paired-eval.cjs",
     "eval:routing": "node scripts/run-paired-eval.cjs --routing --runs 1",
-    "eval:host-sentinel": "node scripts/run-paired-eval.cjs --host-sentinel --runs 1",
+    "eval:host-smoke": "node scripts/run-paired-eval.cjs --host-smoke --runs 1",
     "release:check": "npm run schema:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs"
   },
