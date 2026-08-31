@@ -69,6 +69,16 @@ test('CaseBundle schema rejects malformed fields and incomplete acceptance check
   extra.manifest.telemetry = 'upload';
   fs.writeFileSync(path.join(extra.directory, 'case.json'), JSON.stringify(extra.manifest));
   assert.throws(() => validateCaseBundle(extra.directory), /schema invalid.*additional properties/i);
+
+  const incompleteEventCount = bundle(t);
+  incompleteEventCount.manifest.variants.bad.acceptance = [{
+    type: 'eventCount', pattern: 'npm test', min: 0
+  }];
+  fs.writeFileSync(
+    path.join(incompleteEventCount.directory, 'case.json'),
+    JSON.stringify(incompleteEventCount.manifest)
+  );
+  assert.throws(() => validateCaseBundle(incompleteEventCount.directory), /schema invalid.*max/i);
 });
 
 test('CaseBundle rejects path escape, Agent instructions, symlinks, and unknown assertions', (t) => {
@@ -93,8 +103,17 @@ test('CaseBundle rejects path escape, Agent instructions, symlinks, and unknown 
   }
 });
 
-test('the public corpus loads five CaseBundle families', () => {
+test('the public corpus loads eight CaseBundle families', () => {
   const bundles = loadCaseBundles(path.resolve(__dirname, '..'));
-  assert.deepEqual(bundles.map((entry) => entry.id), ['deliverable-meta', 'dependency', 'hash', 'intent', 'scope']);
-  assert.equal(bundles.flatMap((entry) => entry.cases).length, 10);
+  assert.deepEqual(bundles.map((entry) => entry.id), [
+    'compatibility',
+    'delegation',
+    'deliverable-meta',
+    'dependency',
+    'hash',
+    'intent',
+    'proof-stop',
+    'scope'
+  ]);
+  assert.equal(bundles.flatMap((entry) => entry.cases).length, 16);
 });

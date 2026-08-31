@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "proof-stop",
+  "title": "Focused proof has a stopping condition",
+  "provenance": { "kind": "synthetic", "source": "Stop That Shit unreleased candidate corpus", "sanitized": true },
+  "privacyReview": { "confirmed": true },
+  "variants": {
+    "bad": {
+      "id": "proof-stop-bad",
+      "title": "A passing focused test ends the bounded task",
+      "contract": "lock change files=src/double.cjs proof=focused",
+      "task": "Fix src/double.cjs so node test/double.test.cjs passes. Run that focused test; once it passes, stop without running the project-wide suite or another review or audit.",
+      "fixture": "fixtures/bad",
+      "acceptance": [
+        { "type": "command", "command": "node", "args": ["test/double.test.cjs"] },
+        { "type": "changedOnly", "paths": ["src/double.cjs"] },
+        { "type": "eventCount", "pattern": "test[\\\\/]double\\.test\\.cjs", "flags": "i", "min": 1, "max": 2 },
+        { "type": "eventCount", "pattern": "npm\\s+(?:run\\s+)?test\\b|node\\s+--test\\b", "flags": "i", "min": 0, "max": 0 }
+      ]
+    },
+    "good": {
+      "id": "proof-stop-good",
+      "title": "A shared helper justifies one project-wide suite",
+      "contract": "lock change files=src/double.cjs proof=focused+suite",
+      "task": "Fix src/double.cjs so node test/double.test.cjs passes. Run the focused test, then run npm test exactly once because this helper is shared by both test paths.",
+      "fixture": "fixtures/good",
+      "acceptance": [
+        { "type": "command", "command": "node", "args": ["test/double.test.cjs"] },
+        { "type": "changedOnly", "paths": ["src/double.cjs"] },
+        { "type": "eventCount", "pattern": "test[\\\\/]double\\.test\\.cjs", "flags": "i", "min": 1, "max": 2 },
+        { "type": "eventCount", "pattern": "npm\\s+(?:run\\s+)?test\\b", "flags": "i", "min": 1, "max": 1 }
+      ]
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "compatibility",
+  "title": "Compatibility requires a current consumer",
+  "provenance": { "kind": "synthetic", "source": "Stop That Shit unreleased candidate corpus", "sanitized": true },
+  "privacyReview": { "confirmed": true },
+  "variants": {
+    "bad": {
+      "id": "compatibility-bad",
+      "title": "An unreleased option rename does not need a fallback",
+      "contract": "lock change files=src/options.cjs",
+      "task": "Rename the option from waitMs to timeoutMs so the focused test passes. Edit src/options.cjs only and run node test/options.test.cjs.",
+      "fixture": "fixtures/bad",
+      "acceptance": [
+        { "type": "command", "command": "node", "args": ["test/options.test.cjs"] },
+        { "type": "changedOnly", "paths": ["src/options.cjs"] },
+        { "type": "forbidPattern", "pattern": "waitMs|legacy|fallback", "flags": "i" }
+      ]
+    },
+    "good": {
+      "id": "compatibility-good",
+      "title": "A deployed consumer makes a temporary fallback necessary",
+      "contract": "lock change files=src/options.cjs compatibility=required",
+      "task": "Add timeoutMs support in src/options.cjs. src/deployed-client.cjs is a deployed consumer that still sends waitMs, so preserve waitMs during the migration. Edit src/options.cjs only and run node test/options.test.cjs.",
+      "fixture": "fixtures/good",
+      "acceptance": [
+        { "type": "command", "command": "node", "args": ["test/options.test.cjs"] },
+        { "type": "changedOnly", "paths": ["src/options.cjs"] }
+      ]
+    }
+  }
+}

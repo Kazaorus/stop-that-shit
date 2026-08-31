@@ -8,14 +8,20 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const {
   buildCodexArgs,
+  buildHostSentinelPlan,
   buildPlan,
+  buildRoutingPlan,
   assertNoAgentInstructions,
+  assertInstalledHooksTrusted,
   assertInstalledPluginMatchesSource,
   assertIsolatedPluginList,
   assertWorkspaceRootIsolated,
   evaluateAcceptance,
   isSuccessfulSummary,
+  loadInstructionArm,
   materializeFixture,
+  observeHostEffect,
+  observeSentinelAttempt,
   repositoryRevision,
   resolveCodexInvocation,
   rescoreRun,
@@ -35,6 +41,10 @@ function parseArgs(argv) {
     cases: [],
     arms: [],
     caseDirectories: [],
+    instructionFiles: [],
+    comparison: null,
+    routing: false,
+    hostSentinel: false,
     model: null,
     reasoning: null,
     maxCells: null,
@@ -54,6 +64,10 @@ function parseArgs(argv) {
     else if (arg === '--case') options.cases.push(argv[++index]);
     else if (arg === '--arm') options.arms.push(argv[++index]);
     else if (arg === '--case-dir') options.caseDirectories.push(argv[++index]);
+    else if (arg === '--instruction-file') options.instructionFiles.push(argv[++index]);
+    else if (arg === '--compare-arms') options.comparison = argv[++index];
+    else if (arg === '--routing') options.routing = true;
+    else if (arg === '--host-sentinel') options.hostSentinel = true;
     else if (arg === '--model') options.model = argv[++index];
     else if (arg === '--reasoning') options.reasoning = argv[++index];
     else if (arg === '--max-cells') options.maxCells = Number(argv[++index]);
@@ -75,6 +89,9 @@ function parseArgs(argv) {
   if (options.maxCells !== null && (!Number.isInteger(options.maxCells) || options.maxCells < 1)) {
     throw new Error('max-cells must be a positive integer');
   }
+  if (options.comparison && !/^[a-z][a-z0-9-]{0,31}:[a-z][a-z0-9-]{0,31}$/.test(options.comparison)) {
+    throw new Error('compare-arms must use <control>:<candidate>');
+  }
   return options;
 }
 
@@ -88,7 +105,11 @@ function usage() {
     '  --runs <n>       Repetitions per case and arm (default: 3)',
     '  --case <id>      Select a family or full case id; repeatable',
     '  --case-dir <p>   Load one external CaseBundle v1 directory; repeatable',
-    '  --arm <id>       Select baseline, instruction, or plugin; repeatable',
+    '  --instruction-file <id>=<path>  Add a versioned instruction arm; repeatable',
+    '  --arm <id>       Select a built-in or versioned arm; repeatable',
+    '  --compare-arms <control>:<candidate>  Select the summary comparison',
+    '  --routing        Run the implicit Skill-routing corpus with Hooks disabled',
+    '  --host-sentinel  Run the two-cell Hook host-effect sentinel with Hooks enabled',
     '  --rescore <p>    Recompute acceptance from one archived run without Codex',
     '  --allow-acceptance-commands  Permit reviewed command checks during rescore',
     '  --model <id>     Pin the Codex model (required with --run)',
@@ -139,7 +160,7 @@ function runCodex(invocation, args, options) {
   return spawnSync(invocation.command, [...invocation.argsPrefix, ...args], options);
 }
 
-function preflightEvalHome(invocation, codexHome) {
+function preflightEvalHome(invocation, codexHome, { requireHooks = false } = {}) {
   if (!codexHome) {
     throw new Error('--codex-home or STS_EVAL_CODEX_HOME is required with --run');
   }
@@ -157,10 +178,18 @@ function preflightEvalHome(invocation, codexHome) {
   if (plugins.status !== 0) {
     throw new Error(plugins.stderr || 'could not list plugins in the isolated eval Codex home');
   }
-  assertIsolatedPluginList(plugins.stdout);
+  const enabledPlugins = assertIsolatedPluginList(plugins.stdout);
   const pluginCache = assertInstalledPluginMatchesSource(root, resolved, packageJson.version);
+  const hookTrust = requireHooks ? assertInstalledHooksTrusted(resolved, pluginCache) : [];
   const version = runCodex(invocation, ['--version'], { encoding: 'utf8', env });
-  return { codexHome: resolved, pluginCache, env, codexVersion: version.status === 0 ? version.stdout.trim() : 'unknown' };
+  return {
+    codexHome: resolved,
+    pluginCache,
+    env,
+    codexVersion: version.status === 0 ? version.stdout.trim() : 'unknown',
+    enabledPlugins,
+    hookTrust
+  };
 }
 
 function finalResponse(eventsText) {
@@ -201,14 +230,30 @@ function runCell(invocation, cell, options, evalProfile) {
     });
     const durationMs = Date.now() - startedAt;
     const eventsText = execution.stdout || '';
+    const stderrText = execution.stderr
+      || (execution.error ? `${execution.error.stack || execution.error.message}\n` : '');
     const responseText = finalResponse(eventsText);
+    const runtimeResult = readRuntime({}, { dataDir: runtimeData });
+    const sentinelAttempt = cell.sentinelPath
+      ? observeSentinelAttempt(eventsText, stderrText, cell.sentinelPath)
+      : null;
+    const hostObservation = cell.sentinelPath
+      ? observeHostEffect({
+          runtime: runtimeResult,
+          workspace,
+          sentinelPath: cell.sentinelPath,
+          attempted: sentinelAttempt.attempted
+        })
+      : null;
     const acceptance = evaluateAcceptance({
       workspace,
       acceptance: cell.acceptance,
       responseText,
-      eventsText
+      eventsText,
+      stderrText,
+      runtime: runtimeResult,
+      hostEffect: hostObservation ? hostObservation.hostEffect : 'unobserved'
     });
-    const runtime = readRuntime({}, { dataDir: runtimeData }).summary;
     const executionFacts = {
       exitStatus: execution.status,
       signal: execution.signal,
@@ -221,6 +266,9 @@ function runCell(invocation, cell, options, evalProfile) {
       family: cell.family,
       kind: cell.kind,
       arm: cell.arm,
+      expectedSkillLoaded: cell.expectedSkillLoaded ?? null,
+      expectedHookDecision: cell.expectedHookDecision ?? null,
+      expectedHostEffect: cell.expectedHostEffect ?? null,
       run: cell.run,
       prompt: cell.prompt,
       environment: {
@@ -231,18 +279,28 @@ function runCell(invocation, cell, options, evalProfile) {
         architecture: process.arch,
         sandbox: options.dangerFullAccess ? 'danger-full-access' : 'workspace-write',
         pluginVersion: packageJson.version,
-        pluginRevision: evalProfile.pluginRevision
+        pluginRevision: evalProfile.pluginRevision,
+        invocationMode: cell.invocationMode,
+        skillRef: cell.skillRef,
+        skillDigest: cell.skillDigest,
+        caseBundleDigest: cell.caseBundleDigest,
+        enabledPlugins: evalProfile.enabledPlugins,
+        hookTrust: evalProfile.hookTrust
       },
       ...executionFacts,
       durationMs,
-      runtime,
+      runtime: runtimeResult.summary,
+      hookDecision: hostObservation ? hostObservation.hookDecision.actual : null,
+      hookReasonCodes: hostObservation ? hostObservation.hookDecision.reasonCodes : [],
+      hostEffect: hostObservation ? hostObservation.hostEffect : 'unobserved',
+      sentinelAttempted: sentinelAttempt ? sentinelAttempt.attempted : null,
       acceptance
     };
     result.status = resultStatus(result, acceptance);
     fs.writeFileSync(path.join(outputDirectory, 'events.jsonl'), eventsText, 'utf8');
     fs.writeFileSync(
       path.join(outputDirectory, 'stderr.txt'),
-      execution.stderr || (execution.error ? `${execution.error.stack || execution.error.message}\n` : ''),
+      stderrText,
       'utf8'
     );
     fs.writeFileSync(path.join(outputDirectory, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
@@ -265,7 +323,32 @@ function main() {
     }), null, 2)}\n`);
     return;
   }
-  const plan = filterPlan(buildPlan({ runs: options.runs, caseDirectories: options.caseDirectories }), options);
+  const comparison = options.comparison
+    ? { control: options.comparison.split(':')[0], candidate: options.comparison.split(':')[1] }
+    : null;
+  if (options.routing && options.hostSentinel) {
+    throw new Error('--routing and --host-sentinel are mutually exclusive');
+  }
+  if ((options.routing || options.hostSentinel)
+      && (options.caseDirectories.length > 0 || options.instructionFiles.length > 0 || comparison)) {
+    throw new Error('specialized eval modes cannot be combined with case-dir, instruction-file, or compare-arms');
+  }
+  const plan = filterPlan(options.routing
+    ? buildRoutingPlan({ runs: options.runs })
+    : options.hostSentinel
+      ? buildHostSentinelPlan({ runs: options.runs })
+      : buildPlan({
+        runs: options.runs,
+        caseDirectories: options.caseDirectories,
+        instructionArms: options.instructionFiles.map(loadInstructionArm),
+        comparison
+      }), options);
+  if (comparison) {
+    const selectedArms = new Set(plan.arms.map((arm) => arm.id));
+    if (!selectedArms.has(comparison.control) || !selectedArms.has(comparison.candidate)) {
+      throw new Error('compare-arms must name two selected arms');
+    }
+  }
   if (options.dryRun) {
     process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
     return;
@@ -287,7 +370,9 @@ function main() {
     throw new Error(`selected matrix has ${plan.cells.length} cells, above --max-cells ${options.maxCells}`);
   }
   const invocation = findCodexInvocation();
-  const evalProfile = preflightEvalHome(invocation, options.codexHome);
+  const evalProfile = preflightEvalHome(invocation, options.codexHome, {
+    requireHooks: plan.arms.some((arm) => arm.hooksEnabled)
+  });
   evalProfile.pluginRevision = repositoryRevision(root);
   options.workspaceRoot = assertWorkspaceRootIsolated(root, options.workspaceRoot);
   assertNoAgentInstructions(options.workspaceRoot);
@@ -304,11 +389,22 @@ function main() {
     const result = runCell(invocation, cell, options, evalProfile);
     results.push(result);
     process.stderr.write(`${result.acceptance.pass ? 'PASS' : 'FAIL'} ${cell.id}\n`);
+    if (result.status === 'infrastructure_error') {
+      process.stderr.write(`STOP infrastructure error in ${cell.id}; remaining cells were not run\n`);
+      break;
+    }
   }
-  const summary = summarizeResults(results, { planned: plan.cells.length });
+  const summary = summarizeResults(results, {
+    planned: plan.cells.length,
+    comparison: ['skill-routing', 'host-sentinel'].includes(plan.evalType)
+      ? null
+      : plan.comparison || undefined
+  });
   fs.writeFileSync(path.join(runRoot, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
-  if (!isSuccessfulSummary(summary)) process.exitCode = 1;
+  if (options.routing || options.hostSentinel ? !summary.allPassed : !isSuccessfulSummary(summary)) {
+    process.exitCode = 1;
+  }
 }
 
 try {
