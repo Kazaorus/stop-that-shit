@@ -4,6 +4,41 @@
 
 No unreleased changes yet.
 
+## 0.2.0 — 2026-09-01 (Stop That Shit Slop / 别再废话)
+
+> **从多做一步，到多说一句。** Stop That Shit Slop 把任务边界判断带到提案和
+> 决策文字：判断一句话该删、该收紧、该移动，还是留下。
+>
+> **From one extra action to one extra sentence.** Stop That Shit Slop applies
+> task-boundary judgment to proposals and decision-facing writing: drop,
+> calibrate, relocate, or keep each sentence.
+
+### 新增 / New
+
+- **独立 STSS Skill**：增加 `rewrite` 与 `audit` 两种模式，处理没有决策
+  消费者的免责声明、多层 hedging、自我辩护、负向范围和空洞提案话术。
+  / Adds a standalone STSS Skill with `rewrite` and `audit` modes for
+  disclaimers without a decision consumer, hedge stacks, self-defense,
+  negative scope, and hollow proposal language.
+- **Claim-preserving method**：使用 Claim Ledger、Sentence Consumer Test 和
+  Claim Diff，核对原文中的事实、数字、责任主体、证据强度和因果关系。
+  / Uses a Claim Ledger, Sentence Consumer Test, and Claim Diff to check the
+  supplied facts, numbers, actors, evidence strength, and causal relationships.
+- **离线验收**：增加六组 Good/Bad CaseBundle、十二个合成 fixture 和对应的
+  固定离线响应回归。/ Adds six Good/Bad CaseBundle families, twelve synthetic
+  fixtures, and matching fixed offline-response regressions.
+- **分发与文档**：完整插件可发现两个 Skill；Pi package 注册 STSS；同一源码
+  目录也支持单独安装 STSS。中英文 README 改为“别再造史，也别再废话”的
+  双 Skill 结构。/ Makes both Skills discoverable from the full plugin,
+  registers STSS in the Pi package, and supports standalone STSS installation
+  from the same source directory. The Chinese and English READMEs now present
+  the two-Skill product.
+- **显式更新检查**：`sts doctor --check-update` 在用户调用时查询 GitHub
+  Release，返回 `installed`、`latest` 和 `releaseUrl`；STSS 的单独安装继续由
+  宿主或 Skill Installer 更新。/ `sts doctor --check-update` queries GitHub
+  Releases when invoked and returns `installed`, `latest`, and `releaseUrl`;
+  the host or Skill Installer manages standalone STSS updates.
+
 ## 0.1.1 — 2026-09-01 (Evaluation and boundary refinements / 评估与边界收敛)
 
 > **在 0.1.0 的四套宿主基础上加入 Pi，并把评估证据拆开。** 0.1.1
