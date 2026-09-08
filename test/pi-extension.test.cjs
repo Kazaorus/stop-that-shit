@@ -170,6 +170,30 @@ test('delegation reservation is released on tool_result', (t) => {
   assert.equal(pi.handlers.get('tool_call')(delegation('subagent-2', 'inspect again'), ctx), undefined);
 });
 
+test('Pi ignores tool_result events without toolCallId without reporting an adapter failure', (t) => {
+  const dataDir = workspace(t);
+  const pi = fakePi();
+  const ctx = fakeContext('malformed-result-session');
+  registerPiExtension(pi, { dataDir });
+  pi.handlers.get('input')(input('$stop-that-shit change concurrent-agents=1 -- delegate'), ctx);
+  pi.handlers.get('tool_call')({
+    type: 'tool_call',
+    toolCallId: 'subagent-1',
+    toolName: 'subagent',
+    input: { agent: 'scout', task: 'inspect' }
+  }, ctx);
+
+  assert.doesNotThrow(() => pi.handlers.get('tool_result')({
+    type: 'tool_result',
+    toolName: 'subagent',
+    input: {},
+    content: [],
+    isError: false
+  }, ctx));
+  assert.deepEqual(ctx.notifications, []);
+  assert.equal(readState('malformed-result-session', dataDir).delegation.reservations['reservation:subagent-1'].pendingCount, 1);
+});
+
 test('adapter operational errors fail open while policy denials still block', (t) => {
   const directory = workspace(t);
   const blocker = path.join(directory, 'blocker');

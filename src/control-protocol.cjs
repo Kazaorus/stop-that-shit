@@ -41,6 +41,7 @@ function assertControlEvent(event) {
     if (!MUTABILITIES.has(event.action.mutability)) {
       throw new TypeError(`Unsupported action mutability: ${event.action.mutability}.`);
     }
+    if (event.action.mutability === 'delegate') nonEmptyString(event.action.id, 'action.id');
     if (
       event.action.delegationCount !== undefined
       && (!Number.isInteger(event.action.delegationCount) || event.action.delegationCount < 0)

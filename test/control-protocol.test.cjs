@@ -76,6 +76,26 @@ test('Codex Adapter maps lifecycle Hook fields to ControlEvent v1', () => {
   }
 });
 
+test('Codex ignores PostToolUse events without a valid action identifier', () => {
+  for (const identifier of [undefined, null, '', '   ', 42]) {
+    const input = {
+      session_id: 'malformed-after',
+      hook_event_name: 'PostToolUse',
+      tool_use_id: identifier
+    };
+    assert.equal(toControlEvent(input), null);
+    assert.equal(handleCodexHook(input), null);
+  }
+
+  const fallback = toControlEvent({
+    session_id: 'fallback-after',
+    hook_event_name: 'PostToolUse',
+    tool_use_id: 42,
+    tool_call_id: 'fallback-call'
+  });
+  assert.equal(fallback.action.id, 'fallback-call');
+});
+
 test('Codex prompt hooks block legacy directives instead of dropping the error', (t) => {
   const directory = dataDir(t);
   handleCodexHook({
@@ -194,7 +214,7 @@ test('protocol accepts only non-negative integer delegation counts', () => {
     protocolVersion: 1,
     kind: 'action.before',
     sessionId: 'session-1',
-    action: { name: 'delegate_task', input: {}, mutability: 'delegate' }
+    action: { id: 'delegate-call', name: 'delegate_task', input: {}, mutability: 'delegate' }
   };
   assert.doesNotThrow(() => assertControlEvent(event));
   assert.doesNotThrow(() => assertControlEvent({
@@ -211,6 +231,31 @@ test('protocol accepts only non-negative integer delegation counts', () => {
       action: { ...event.action, delegationCount }
     }), /delegationCount/);
   }
+});
+
+test('protocol requires action identifiers only for delegation before-events', () => {
+  assert.doesNotThrow(() => assertControlEvent({
+    protocolVersion: 1,
+    kind: 'action.before',
+    sessionId: 'session-1',
+    action: { name: 'write-file', mutability: 'write' }
+  }));
+
+  for (const id of [undefined, null, '', '   ', 42]) {
+    assert.throws(() => assertControlEvent({
+      protocolVersion: 1,
+      kind: 'action.before',
+      sessionId: 'session-1',
+      action: { id, name: 'delegate_task', mutability: 'delegate', delegationCount: 1 }
+    }), /action\.id/);
+  }
+
+  assert.doesNotThrow(() => assertControlEvent({
+    protocolVersion: 1,
+    kind: 'action.before',
+    sessionId: 'session-1',
+    action: { id: 'delegate-call', name: 'delegate_task', mutability: 'delegate', delegationCount: 1 }
+  }));
 });
 
 test('protocol accepts lifecycle events and action identifiers', () => {

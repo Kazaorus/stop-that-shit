@@ -95,7 +95,9 @@ function registerPiExtension(pi, options = {}) {
 
   pi.on('tool_result', (event, ctx) => {
     try {
-      handlePiToolAfter(event, sessionContext(ctx), options);
+      if (typeof event?.toolCallId === 'string' && event.toolCallId.trim()) {
+        handlePiToolAfter(event, sessionContext(ctx), options);
+      }
       const key = toolContextKey(event);
       const text = key ? pendingToolContext.get(key) : null;
       if (key) pendingToolContext.delete(key);

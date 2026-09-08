@@ -160,6 +160,26 @@ test('Claude lifecycle hooks update and clear delegation state', (t) => {
   assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations, {});
 });
 
+test('Claude ignores PostToolUse events without a valid action identifier', () => {
+  for (const identifier of [undefined, null, '', '   ', 42]) {
+    const input = {
+      session_id: 'malformed-after',
+      hook_event_name: 'PostToolUse',
+      tool_use_id: identifier
+    };
+    assert.equal(toControlEvent(input), null);
+    assert.equal(handleClaudeHook(input), null);
+  }
+
+  const fallback = toControlEvent({
+    session_id: 'fallback-after',
+    hook_event_name: 'PostToolUse',
+    tool_use_id: 42,
+    tool_call_id: 'fallback-call'
+  });
+  assert.equal(fallback.action.id, 'fallback-call');
+});
+
 test('review contract blocks Claude Write', (t) => {
   const options = workspace(t);
   handleClaudeHook(prompt('claude-review', '$stop-that-shit review -- inspect only'), options);

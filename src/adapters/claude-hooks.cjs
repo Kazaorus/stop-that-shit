@@ -71,8 +71,11 @@ function toControlEvent(input) {
   }
 
   if (kind === 'action.after') {
+    const actionId = [input.tool_use_id, input.tool_call_id]
+      .find((value) => typeof value === 'string' && value.trim());
+    if (!actionId) return null;
     event.action = {
-      id: input.tool_use_id || input.tool_call_id || null
+      id: actionId
     };
   }
 
