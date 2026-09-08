@@ -5,7 +5,10 @@ const EVENT_KINDS = new Set([
   'session.start',
   'prompt.submit',
   'action.before',
-  'subagent.start'
+  'action.after',
+  'subagent.start',
+  'subagent.stop',
+  'session.end'
 ]);
 const MUTABILITIES = new Set(['read', 'write', 'delegate', 'control', 'unknown']);
 
@@ -43,6 +46,17 @@ function assertControlEvent(event) {
       && (!Number.isInteger(event.action.delegationCount) || event.action.delegationCount < 0)
     ) {
       throw new TypeError('ControlEvent action.delegationCount must be a non-negative integer.');
+    }
+  }
+  if (event.kind === 'action.after') {
+    if (!event.action || typeof event.action !== 'object') {
+      throw new TypeError(`ControlEvent ${event.kind} requires an action object.`);
+    }
+    nonEmptyString(event.action.id, 'action.id');
+  }
+  if (event.kind === 'subagent.start' || event.kind === 'subagent.stop') {
+    for (const field of ['agentId', 'reservationId']) {
+      if (event[field] !== undefined && event[field] !== null) nonEmptyString(event[field], field);
     }
   }
 

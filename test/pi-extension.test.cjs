@@ -128,6 +128,48 @@ test('watch-only tool context is appended after the tool result', (t) => {
   assert.match(result.content[1].text, /WATCH \/ INTENT/);
 });
 
+test('watch context follows toolCallId across tool result contexts', (t) => {
+  const dataDir = workspace(t);
+  const pi = fakePi();
+  const callContext = fakeContext('watch-call-session');
+  const resultContext = fakeContext('watch-result-session');
+  registerPiExtension(pi, { dataDir });
+  pi.handlers.get('input')(input('$stop-that-shit watch review -- inspect'), callContext);
+
+  pi.handlers.get('tool_call')({
+    type: 'tool_call', toolCallId: 'shared-tool-id', toolName: 'write', input: { path: '/repo/out.txt', content: 'x' }
+  }, callContext);
+  const result = pi.handlers.get('tool_result')({
+    type: 'tool_result', toolCallId: 'shared-tool-id', toolName: 'write', input: {},
+    content: [{ type: 'text', text: 'written' }], isError: false
+  }, resultContext);
+
+  assert.equal(result.content.length, 2);
+  assert.match(result.content[1].text, /WATCH \/ INTENT/);
+});
+
+test('delegation reservation is released on tool_result', (t) => {
+  const dataDir = workspace(t);
+  const pi = fakePi();
+  const ctx = fakeContext('delegation-session');
+  registerPiExtension(pi, { dataDir });
+  pi.handlers.get('input')(input('$stop-that-shit change concurrent-agents=1 -- delegate'), ctx);
+
+  const delegation = (toolCallId, task) => ({
+    type: 'tool_call',
+    toolCallId,
+    toolName: 'subagent',
+    input: { agent: 'scout', task }
+  });
+  assert.equal(pi.handlers.get('tool_call')(delegation('subagent-1', 'inspect'), ctx), undefined);
+  pi.handlers.get('tool_result')({
+    type: 'tool_result', toolCallId: 'subagent-1', toolName: 'subagent', input: {},
+    content: [], isError: false
+  }, ctx);
+
+  assert.equal(pi.handlers.get('tool_call')(delegation('subagent-2', 'inspect again'), ctx), undefined);
+});
+
 test('adapter operational errors fail open while policy denials still block', (t) => {
   const directory = workspace(t);
   const blocker = path.join(directory, 'blocker');

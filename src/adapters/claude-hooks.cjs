@@ -15,7 +15,10 @@ const EVENT_KIND = {
   UserPromptSubmit: 'prompt.submit',
   UserPromptExpansion: 'prompt.submit',
   PreToolUse: 'action.before',
-  SubagentStart: 'subagent.start'
+  PostToolUse: 'action.after',
+  SubagentStart: 'subagent.start',
+  SubagentStop: 'subagent.stop',
+  SessionEnd: 'session.end'
 };
 
 function isStopThatShitExpansion(input) {
@@ -67,6 +70,12 @@ function toControlEvent(input) {
       : slashDirective(input.prompt) || String(input.prompt || '');
   }
 
+  if (kind === 'action.after') {
+    event.action = {
+      id: input.tool_use_id || input.tool_call_id || null
+    };
+  }
+
   if (kind === 'action.before') {
     event.action = {
       id: input.tool_use_id || null,
@@ -79,6 +88,12 @@ function toControlEvent(input) {
       cwd: input.cwd,
       unboundedDelegation: isUnboundedDelegation(input.tool_name)
     };
+  }
+
+  if (kind === 'subagent.start' || kind === 'subagent.stop') {
+    event.agentId = input.agent_id || input.agentId || null;
+    const reservationId = input.reservation_id || input.reservationId;
+    if (reservationId) event.reservationId = reservationId;
   }
 
   return event;
@@ -96,7 +111,15 @@ function contextOutput(hookEventName, text) {
 function fromControlResult(hookEventName, result) {
   if (!result || result.kind === 'none') return null;
 
+  if (result.kind === 'prompt-error') {
+    return {
+      decision: 'block',
+      reason: result.message
+    };
+  }
+
   if (result.kind === 'context') {
+    if (['PostToolUse', 'SubagentStop', 'SessionEnd'].includes(hookEventName)) return null;
     return contextOutput(hookEventName, result.text);
   }
 

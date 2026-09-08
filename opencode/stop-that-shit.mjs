@@ -5,7 +5,9 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 const {
   handleOpenCodeMessage,
+  handleOpenCodeSessionEnd,
   handleOpenCodeTool,
+  handleOpenCodeToolAfter,
   promptText
 } = require('../src/adapters/opencode-hooks.cjs');
 const { contractContext } = require('../src/controller.cjs');
@@ -69,11 +71,18 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
     roots.set(info.id, root);
   }
 
+  function isRootSession(info) {
+    if (!info || !info.id) return false;
+    const root = roots.get(info.id);
+    return root === info.id || (!root && !info.parentID);
+  }
+
   function forgetSession(info) {
     if (!info || !info.id) return;
-    roots.delete(info.id);
-    for (const [id, root] of roots) {
-      if (root === info.id) roots.delete(id);
+    if (isRootSession(info)) {
+      for (const [id, root] of roots) {
+        if (id === info.id || root === info.id) roots.delete(id);
+      }
     }
     pending.delete(info.id);
     lastInjected.delete(info.id);
@@ -254,6 +263,18 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
       if (type === 'session.created' || type === 'session.updated') {
         rememberSession(properties.info);
       } else if (type === 'session.deleted') {
+        if (isRootSession(properties.info)) {
+          const sessionID = roots.get(properties.info && properties.info.id) || properties.info.id;
+          try {
+            handleOpenCodeSessionEnd(
+              { sessionID },
+              { controlSessionID: sessionID, directory },
+              { dataDir }
+            );
+          } catch (error) {
+            await logFailure('session end', error);
+          }
+        }
         forgetSession(properties.info);
       } else if (type === 'message.part.updated') {
         await handlePartUpdated(properties.part);
@@ -278,6 +299,19 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
     },
 
     'tool.execute.after': async (input, output) => {
+      if (input && input.sessionID && (input.callID || input.callId)) {
+        const resolved = await resolveRoot(input.sessionID, 'session resolution');
+        try {
+          handleOpenCodeToolAfter(
+            input,
+            output,
+            { controlSessionID: resolved.sessionID, directory },
+            { dataDir }
+          );
+        } catch (error) {
+          await logFailure('tool.execute.after', error);
+        }
+      }
       const key = `${input.sessionID}:${input.callID}`;
       const pendingEntry = pendingContext.get(key);
       pendingContext.delete(key);

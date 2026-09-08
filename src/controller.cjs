@@ -1,7 +1,18 @@
 'use strict';
 
-const { parseContractPrompt } = require('./contracts.cjs');
+const crypto = require('node:crypto');
+const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = require('./contracts.cjs');
 const { assertControlEvent } = require('./control-protocol.cjs');
+const {
+  activeDelegationCount,
+  bindSubagent,
+  clearDelegations,
+  firstPendingReservation,
+  releaseReservation,
+  releaseSubagent,
+  reserveDelegation,
+  reservationForAction
+} = require('./delegation-state.cjs');
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
 const { recordAnnotation } = require('./runtime-annotations.cjs');
@@ -15,7 +26,11 @@ function context(text) {
   return { kind: 'context', text };
 }
 
-function contractContext(contract, phase = 'active') {
+function contractContext(contract, delegation = {}, phase = 'active') {
+  if (typeof delegation === 'string') {
+    phase = delegation;
+    delegation = {};
+  }
   if (contract.level === 'off') {
     return 'Stop That Shit is disabled for this session. No plugin decision is being enforced.';
   }
@@ -27,8 +42,18 @@ function contractContext(contract, phase = 'active') {
     ].join(' ');
   }
 
+  const totalLimit = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
+    ? contract.totalAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const concurrentLimit = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
+    ? contract.concurrentAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const totalUsed = Number.isSafeInteger(delegation.totalAgentsUsed) && delegation.totalAgentsUsed >= 0
+    ? delegation.totalAgentsUsed
+    : 0;
+
   return [
-    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${contract.agentsUsed}/${contract.agentBudget}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
+    `Stop That Shit (${phase}): mode=${contract.mode}; total=${totalUsed}/${totalLimit}; concurrent=${activeDelegationCount(delegation)}/${concurrentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
     'Stop Ladder: Is it requested? Is it necessary? What reachable evidence proves that? Would omission fail the current acceptance?',
     'Report real findings even when implementation is not authorized.',
     'Before expanding scope, name reachable evidence, failure if omitted, and the fact that changes the next action.',
@@ -124,8 +149,15 @@ function handlePrompt(event, options) {
   const command = runtimeCommand(event.prompt);
   if (command) return handleRuntimeCommand(command, event, state, options);
   const parsed = parseContractPrompt(event.prompt, state.contract);
+  if (parsed.error) {
+    state.directiveError = parsed.error;
+    state.lastPromptContext = null;
+    writeState(event.sessionId, state, options.dataDir);
+    return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
+  }
   state.contract = parsed.contract;
-  const promptContext = contractContext(state.contract);
+  if (parsed.directive || parsed.correction) state.directiveError = null;
+  const promptContext = contractContext(state.contract, state.delegation);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
   writeState(event.sessionId, state, options.dataDir);
@@ -152,15 +184,20 @@ function handleBeforeAction(event, options) {
     const result = decide({ contract: state.contract, action, state });
 
     if (event.action.mutability === 'delegate' && result.outcome === 'allow') {
-      state.contract.agentsUsed += delegationCount;
-      writeState(event.sessionId, state, options.dataDir);
+      const actionId = event.action.id;
+      const existingReservation = reservationForAction(state.delegation, actionId);
+      if (!existingReservation) {
+        const reservationId = actionId ? `reservation:${actionId}` : `reservation:${crypto.randomUUID()}`;
+        state.delegation = reserveDelegation(state.delegation, reservationId, actionId, delegationCount);
+        writeState(event.sessionId, state, options.dataDir);
+      }
     }
     return { state, result };
   };
 
   // Separate host processes can issue independent agent launches close together.
-  // Serialize only delegation reservations so agents=N remains a real budget
-  // across separate Hook processes without adding locks to the common fast path.
+  // Serialize only delegation reservations so both limits remain real across
+  // separate Hook processes without adding locks to the common fast path.
   const { state, result } = event.action.mutability === 'delegate'
     ? withSessionLock(event.sessionId, options.dataDir, evaluate)
     : evaluate();
@@ -173,6 +210,7 @@ function handleBeforeAction(event, options) {
     sessionId: event.sessionId,
     action: event.action,
     contract: state.contract,
+    delegation: state.delegation,
     decision: result,
     responseOutcome
   }, options);
@@ -186,9 +224,42 @@ function handleBeforeAction(event, options) {
   return none();
 }
 
+function handleAfterAction(event, options) {
+  return withSessionLock(event.sessionId, options.dataDir, () => {
+    const state = readState(event.sessionId, options.dataDir);
+    const reservationId = reservationForAction(state.delegation, event.action.id);
+    if (reservationId) {
+      state.delegation = releaseReservation(state.delegation, reservationId);
+      writeState(event.sessionId, state, options.dataDir);
+    }
+    return none();
+  });
+}
+
 function handleLifecycleContext(event, options) {
-  const state = readState(event.sessionId, options.dataDir);
-  return context(contractContext(state.contract));
+  const update = () => {
+    const state = readState(event.sessionId, options.dataDir);
+    let nextDelegation = state.delegation;
+    if (event.kind === 'subagent.start' && event.agentId) {
+      nextDelegation = bindSubagent(
+        state.delegation,
+        event.agentId,
+        event.reservationId || firstPendingReservation(state.delegation)
+      );
+    } else if (event.kind === 'subagent.stop' && event.agentId) {
+      nextDelegation = releaseSubagent(state.delegation, event.agentId);
+    } else if (event.kind === 'session.end') {
+      nextDelegation = clearDelegations(state.delegation);
+    }
+    if (nextDelegation !== state.delegation) {
+      state.delegation = nextDelegation;
+      writeState(event.sessionId, state, options.dataDir);
+    }
+    return context(contractContext(state.contract, nextDelegation));
+  };
+  return ['subagent.start', 'subagent.stop', 'session.end'].includes(event.kind)
+    ? withSessionLock(event.sessionId, options.dataDir, update)
+    : update();
 }
 
 function handleControlEvent(rawEvent, options = {}) {
@@ -198,8 +269,12 @@ function handleControlEvent(rawEvent, options = {}) {
       return handlePrompt(event, options);
     case 'action.before':
       return handleBeforeAction(event, options);
+    case 'action.after':
+      return handleAfterAction(event, options);
     case 'session.start':
     case 'subagent.start':
+    case 'subagent.stop':
+    case 'session.end':
       return handleLifecycleContext(event, options);
     default:
       return none();

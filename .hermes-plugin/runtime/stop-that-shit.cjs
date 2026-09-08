@@ -18,7 +18,11 @@ const {
 
 const EVENT_KIND = {
   pre_llm_call: 'prompt.submit',
-  pre_tool_call: 'action.before'
+  pre_tool_call: 'action.before',
+  post_tool_call: 'action.after',
+  subagent_start: 'subagent.start',
+  subagent_stop: 'subagent.stop',
+  on_session_end: 'session.end'
 };
 
 function toControlEvent(input) {
@@ -30,8 +34,8 @@ function toControlEvent(input) {
   const event = {
     protocolVersion: PROTOCOL_VERSION,
     kind,
-    sessionId: String(input.session_id || ''),
-    turnId: extra.turn_id || input.turn_id || null,
+    sessionId: String(input.session_id || extra.parent_session_id || ''),
+    turnId: extra.turn_id || extra.parent_turn_id || input.turn_id || null,
     host: {
       family: 'hermes-agent',
       model: input.model || extra.model || null,
@@ -60,12 +64,32 @@ function toControlEvent(input) {
     };
   }
 
+  if (kind === 'action.after') {
+    const actionId = input.tool_call_id || extra.tool_call_id || null;
+    if (!actionId) return null;
+    event.action = { id: String(actionId) };
+  }
+
+  if (kind === 'subagent.start' || kind === 'subagent.stop') {
+    const agentId = extra.child_session_id
+      || input.child_session_id
+      || extra.child_subagent_id
+      || input.child_subagent_id
+      || null;
+    if (agentId) event.agentId = String(agentId);
+    const reservationId = extra.reservation_id || extra.reservationId || null;
+    if (reservationId) event.reservationId = String(reservationId);
+  }
+
   return event;
 }
 
-function fromControlResult(result) {
+function fromControlResult(result, kind) {
   if (!result || result.kind === 'none') return null;
-  if (result.kind === 'context') return { context: result.text };
+  if (result.kind === 'context') {
+    if (['subagent.start', 'subagent.stop', 'session.end'].includes(kind)) return null;
+    return { context: result.text };
+  }
   if (result.kind === 'deny') return { action: 'block', message: result.message };
   return null;
 }
@@ -73,7 +97,7 @@ function fromControlResult(result) {
 function handleHermesHook(input, options = {}) {
   const event = toControlEvent(input);
   if (!event) return null;
-  return fromControlResult(handleControlEvent(event, options));
+  return fromControlResult(handleControlEvent(event, options), event.kind);
 }
 
 module.exports = {
@@ -91,7 +115,10 @@ const EVENT_KINDS = new Set([
   'session.start',
   'prompt.submit',
   'action.before',
-  'subagent.start'
+  'action.after',
+  'subagent.start',
+  'subagent.stop',
+  'session.end'
 ]);
 const MUTABILITIES = new Set(['read', 'write', 'delegate', 'control', 'unknown']);
 
@@ -131,6 +158,17 @@ function assertControlEvent(event) {
       throw new TypeError('ControlEvent action.delegationCount must be a non-negative integer.');
     }
   }
+  if (event.kind === 'action.after') {
+    if (!event.action || typeof event.action !== 'object') {
+      throw new TypeError(`ControlEvent ${event.kind} requires an action object.`);
+    }
+    nonEmptyString(event.action.id, 'action.id');
+  }
+  if (event.kind === 'subagent.start' || event.kind === 'subagent.stop') {
+    for (const field of ['agentId', 'reservationId']) {
+      if (event[field] !== undefined && event[field] !== null) nonEmptyString(event[field], field);
+    }
+  }
 
   return event;
 }
@@ -146,8 +184,19 @@ module.exports = {
 "src/controller.cjs": function(module, exports, __require) {
 'use strict';
 
-const { parseContractPrompt } = __require("src/contracts.cjs");
+const crypto = require('node:crypto');
+const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = __require("src/contracts.cjs");
 const { assertControlEvent } = __require("src/control-protocol.cjs");
+const {
+  activeDelegationCount,
+  bindSubagent,
+  clearDelegations,
+  firstPendingReservation,
+  releaseReservation,
+  releaseSubagent,
+  reserveDelegation,
+  reservationForAction
+} = __require("src/delegation-state.cjs");
 const { decide } = __require("src/decision.cjs");
 const { readRuntime, recordDecision } = __require("src/runtime-audit.cjs");
 const { recordAnnotation } = __require("src/runtime-annotations.cjs");
@@ -161,7 +210,11 @@ function context(text) {
   return { kind: 'context', text };
 }
 
-function contractContext(contract, phase = 'active') {
+function contractContext(contract, delegation = {}, phase = 'active') {
+  if (typeof delegation === 'string') {
+    phase = delegation;
+    delegation = {};
+  }
   if (contract.level === 'off') {
     return 'Stop That Shit is disabled for this session. No plugin decision is being enforced.';
   }
@@ -173,8 +226,18 @@ function contractContext(contract, phase = 'active') {
     ].join(' ');
   }
 
+  const totalLimit = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
+    ? contract.totalAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const concurrentLimit = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
+    ? contract.concurrentAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const totalUsed = Number.isSafeInteger(delegation.totalAgentsUsed) && delegation.totalAgentsUsed >= 0
+    ? delegation.totalAgentsUsed
+    : 0;
+
   return [
-    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${contract.agentsUsed}/${contract.agentBudget}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
+    `Stop That Shit (${phase}): mode=${contract.mode}; total=${totalUsed}/${totalLimit}; concurrent=${activeDelegationCount(delegation)}/${concurrentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
     'Stop Ladder: Is it requested? Is it necessary? What reachable evidence proves that? Would omission fail the current acceptance?',
     'Report real findings even when implementation is not authorized.',
     'Before expanding scope, name reachable evidence, failure if omitted, and the fact that changes the next action.',
@@ -270,8 +333,15 @@ function handlePrompt(event, options) {
   const command = runtimeCommand(event.prompt);
   if (command) return handleRuntimeCommand(command, event, state, options);
   const parsed = parseContractPrompt(event.prompt, state.contract);
+  if (parsed.error) {
+    state.directiveError = parsed.error;
+    state.lastPromptContext = null;
+    writeState(event.sessionId, state, options.dataDir);
+    return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
+  }
   state.contract = parsed.contract;
-  const promptContext = contractContext(state.contract);
+  if (parsed.directive || parsed.correction) state.directiveError = null;
+  const promptContext = contractContext(state.contract, state.delegation);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
   writeState(event.sessionId, state, options.dataDir);
@@ -298,15 +368,20 @@ function handleBeforeAction(event, options) {
     const result = decide({ contract: state.contract, action, state });
 
     if (event.action.mutability === 'delegate' && result.outcome === 'allow') {
-      state.contract.agentsUsed += delegationCount;
-      writeState(event.sessionId, state, options.dataDir);
+      const actionId = event.action.id;
+      const existingReservation = reservationForAction(state.delegation, actionId);
+      if (!existingReservation) {
+        const reservationId = actionId ? `reservation:${actionId}` : `reservation:${crypto.randomUUID()}`;
+        state.delegation = reserveDelegation(state.delegation, reservationId, actionId, delegationCount);
+        writeState(event.sessionId, state, options.dataDir);
+      }
     }
     return { state, result };
   };
 
   // Separate host processes can issue independent agent launches close together.
-  // Serialize only delegation reservations so agents=N remains a real budget
-  // across separate Hook processes without adding locks to the common fast path.
+  // Serialize only delegation reservations so both limits remain real across
+  // separate Hook processes without adding locks to the common fast path.
   const { state, result } = event.action.mutability === 'delegate'
     ? withSessionLock(event.sessionId, options.dataDir, evaluate)
     : evaluate();
@@ -319,6 +394,7 @@ function handleBeforeAction(event, options) {
     sessionId: event.sessionId,
     action: event.action,
     contract: state.contract,
+    delegation: state.delegation,
     decision: result,
     responseOutcome
   }, options);
@@ -332,9 +408,42 @@ function handleBeforeAction(event, options) {
   return none();
 }
 
+function handleAfterAction(event, options) {
+  return withSessionLock(event.sessionId, options.dataDir, () => {
+    const state = readState(event.sessionId, options.dataDir);
+    const reservationId = reservationForAction(state.delegation, event.action.id);
+    if (reservationId) {
+      state.delegation = releaseReservation(state.delegation, reservationId);
+      writeState(event.sessionId, state, options.dataDir);
+    }
+    return none();
+  });
+}
+
 function handleLifecycleContext(event, options) {
-  const state = readState(event.sessionId, options.dataDir);
-  return context(contractContext(state.contract));
+  const update = () => {
+    const state = readState(event.sessionId, options.dataDir);
+    let nextDelegation = state.delegation;
+    if (event.kind === 'subagent.start' && event.agentId) {
+      nextDelegation = bindSubagent(
+        state.delegation,
+        event.agentId,
+        event.reservationId || firstPendingReservation(state.delegation)
+      );
+    } else if (event.kind === 'subagent.stop' && event.agentId) {
+      nextDelegation = releaseSubagent(state.delegation, event.agentId);
+    } else if (event.kind === 'session.end') {
+      nextDelegation = clearDelegations(state.delegation);
+    }
+    if (nextDelegation !== state.delegation) {
+      state.delegation = nextDelegation;
+      writeState(event.sessionId, state, options.dataDir);
+    }
+    return context(contractContext(state.contract, nextDelegation));
+  };
+  return ['subagent.start', 'subagent.stop', 'session.end'].includes(event.kind)
+    ? withSessionLock(event.sessionId, options.dataDir, update)
+    : update();
 }
 
 function handleControlEvent(rawEvent, options = {}) {
@@ -344,8 +453,12 @@ function handleControlEvent(rawEvent, options = {}) {
       return handlePrompt(event, options);
     case 'action.before':
       return handleBeforeAction(event, options);
+    case 'action.after':
+      return handleAfterAction(event, options);
     case 'session.start':
     case 'subagent.start':
+    case 'subagent.stop':
+    case 'session.end':
       return handleLifecycleContext(event, options);
     default:
       return none();
@@ -362,13 +475,14 @@ const MODES = new Set(['answer', 'review', 'change', 'monitor', 'open']);
 const LEVELS = new Set(['watch', 'guard', 'lock', 'off']);
 const HASH_POLICIES = new Set(['deny', 'ask', 'allow']);
 const SCOPE_POLICIES = new Set(['deny', 'ask', 'allow']);
+const DEFAULT_AGENT_LIMIT = Number.MAX_SAFE_INTEGER;
 
 function defaultContract() {
   return {
     mode: 'unconfirmed',
     level: 'watch',
-    agentBudget: 0,
-    agentsUsed: 0,
+    totalAgentBudget: DEFAULT_AGENT_LIMIT,
+    concurrentAgentBudget: DEFAULT_AGENT_LIMIT,
     hashPolicy: 'deny',
     allowedPaths: null,
     dependencyPolicy: 'ask',
@@ -390,14 +504,38 @@ function parseDirective(prompt) {
 
   const head = directiveHead(prompt, mention.index + mention[0].length);
   const tokens = head.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean);
-  const parsed = { mentioned: true };
+  const parsed = { mentioned: true, error: null };
 
   for (const rawToken of tokens) {
     const token = rawToken.toLowerCase();
     if (MODES.has(token)) parsed.mode = token;
     if (LEVELS.has(token)) parsed.level = token;
-    const agents = /^agents=(\d+)$/.exec(token);
-    if (agents) parsed.agentBudget = Math.min(Number(agents[1]), 8);
+    if (/^agents(?:=|$)/i.test(rawToken)) {
+      parsed.error = {
+        code: 'LEGACY_AGENT_DIRECTIVE',
+        token: rawToken,
+        message: 'The agents=N directive was removed; use total-agents=N and/or concurrent-agents=N.'
+      };
+      break;
+    }
+    const totalAgents = /^total-agents=(.*)$/i.exec(rawToken);
+    if (totalAgents) {
+      const value = parseAgentLimit(totalAgents[1]);
+      if (value === null) {
+        parsed.error = invalidAgentLimit(rawToken);
+        break;
+      }
+      parsed.totalAgentBudget = value;
+    }
+    const concurrentAgents = /^concurrent-agents=(.*)$/i.exec(rawToken);
+    if (concurrentAgents) {
+      const value = parseAgentLimit(concurrentAgents[1]);
+      if (value === null) {
+        parsed.error = invalidAgentLimit(rawToken);
+        break;
+      }
+      parsed.concurrentAgentBudget = value;
+    }
     const hash = /^hash=(deny|ask|allow)$/.exec(token);
     if (hash && HASH_POLICIES.has(hash[1])) parsed.hashPolicy = hash[1];
     const files = /^files=(.*)$/i.exec(rawToken);
@@ -407,6 +545,20 @@ function parseDirective(prompt) {
   }
 
   return parsed;
+}
+
+function parseAgentLimit(value) {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function invalidAgentLimit(token) {
+  return {
+    code: 'INVALID_AGENT_LIMIT',
+    token,
+    message: `${token} must be a non-negative safe integer.`
+  };
 }
 
 function naturalCorrection(prompt, previous) {
@@ -436,24 +588,37 @@ function naturalCorrection(prompt, previous) {
 
 function parseContractPrompt(prompt, previousContract = defaultContract()) {
   const previous = { ...defaultContract(), ...previousContract };
+  delete previous.agentBudget;
+  delete previous.agentsUsed;
   const directive = parseDirective(String(prompt || ''));
   const correction = naturalCorrection(String(prompt || ''), previous);
   const next = { ...previous };
   let changed = false;
 
   if (directive) {
+    if (directive.error) {
+      return {
+        contract: previous,
+        changed: false,
+        directive: true,
+        correction: Boolean(correction),
+        error: directive.error
+      };
+    }
     if (directive.mode && directive.mode !== next.mode) {
       next.mode = directive.mode;
-      next.agentsUsed = 0;
       changed = true;
     }
     if (directive.level && directive.level !== next.level) {
       next.level = directive.level;
       changed = true;
     }
-    if (Number.isInteger(directive.agentBudget) && directive.agentBudget !== next.agentBudget) {
-      next.agentBudget = directive.agentBudget;
-      next.agentsUsed = 0;
+    if (Number.isInteger(directive.totalAgentBudget) && directive.totalAgentBudget !== next.totalAgentBudget) {
+      next.totalAgentBudget = directive.totalAgentBudget;
+      changed = true;
+    }
+    if (Number.isInteger(directive.concurrentAgentBudget) && directive.concurrentAgentBudget !== next.concurrentAgentBudget) {
+      next.concurrentAgentBudget = directive.concurrentAgentBudget;
       changed = true;
     }
     if (directive.hashPolicy && directive.hashPolicy !== next.hashPolicy) {
@@ -479,7 +644,6 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
   } else if (correction) {
     if (correction.mode !== next.mode) {
       next.mode = correction.mode;
-      next.agentsUsed = 0;
       changed = true;
     }
     if (next.level === 'watch') {
@@ -493,7 +657,7 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
     next.level = 'watch';
   }
 
-  return { contract: next, changed, directive: Boolean(directive), correction: Boolean(correction) };
+  return { contract: next, changed, directive: Boolean(directive), correction: Boolean(correction), error: null };
 }
 
 module.exports = {
@@ -501,8 +665,136 @@ module.exports = {
   SCOPE_POLICIES,
   LEVELS,
   MODES,
+  DEFAULT_AGENT_LIMIT,
   defaultContract,
   parseContractPrompt
+};
+
+},
+"src/delegation-state.cjs": function(module, exports, __require) {
+'use strict';
+
+function totalAgentsUsed(state) {
+  return Number.isSafeInteger(state && state.totalAgentsUsed) && state.totalAgentsUsed >= 0
+    ? state.totalAgentsUsed
+    : 0;
+}
+
+function reservationsOf(state) {
+  return state && state.reservations && typeof state.reservations === 'object'
+    ? state.reservations
+    : {};
+}
+
+function seenAgentIds(state) {
+  return Array.isArray(state && state.agentIdsSeen) ? state.agentIdsSeen : [];
+}
+
+function activeDelegationCount(state) {
+  return Object.values(reservationsOf(state)).reduce((total, reservation) => {
+    const pendingCount = Number.isSafeInteger(reservation && reservation.pendingCount) && reservation.pendingCount >= 0
+      ? reservation.pendingCount
+      : 0;
+    const agentCount = Array.isArray(reservation && reservation.agentIds)
+      ? reservation.agentIds.length
+      : 0;
+    return total + pendingCount + agentCount;
+  }, 0);
+}
+
+function reserveDelegation(state, reservationId, actionId, count) {
+  if (typeof reservationId !== 'string' || !reservationId) throw new TypeError('reservationId must be a non-empty string.');
+  if (!Number.isSafeInteger(count) || count < 0) throw new TypeError('reservation count must be a non-negative safe integer.');
+  const reservations = reservationsOf(state);
+  if (reservations[reservationId]) return state;
+  return {
+    ...state,
+    totalAgentsUsed: totalAgentsUsed(state) + count,
+    reservations: {
+      ...reservations,
+      [reservationId]: {
+        actionId: String(actionId || ''),
+        pendingCount: count,
+        agentIds: []
+      }
+    }
+  };
+}
+
+function bindSubagent(state, agentId, reservationId) {
+  if (typeof agentId !== 'string' || !agentId) return state;
+  if (seenAgentIds(state).includes(agentId)) return state;
+  const reservations = reservationsOf(state);
+  if (Object.values(reservations).some((reservation) => Array.isArray(reservation.agentIds) && reservation.agentIds.includes(agentId))) {
+    return state;
+  }
+  const reservation = reservations[reservationId];
+  if (!reservation || !Number.isInteger(reservation.pendingCount) || reservation.pendingCount <= 0) return state;
+  return {
+    ...state,
+    agentIdsSeen: [...new Set([...seenAgentIds(state), agentId])],
+    reservations: {
+      ...reservations,
+      [reservationId]: {
+        ...reservation,
+        pendingCount: reservation.pendingCount - 1,
+        agentIds: [...(Array.isArray(reservation.agentIds) ? reservation.agentIds : []), agentId]
+      }
+    }
+  };
+}
+
+function releaseSubagent(state, agentId) {
+  if (typeof agentId !== 'string' || !agentId) return state;
+  const reservations = reservationsOf(state);
+  for (const [reservationId, reservation] of Object.entries(reservations)) {
+    const agentIds = Array.isArray(reservation.agentIds) ? reservation.agentIds : [];
+    if (!agentIds.includes(agentId)) continue;
+    const remainingAgents = agentIds.filter((value) => value !== agentId);
+    const nextReservations = { ...reservations };
+    if (reservation.pendingCount === 0 && remainingAgents.length === 0) {
+      delete nextReservations[reservationId];
+    } else {
+      nextReservations[reservationId] = { ...reservation, agentIds: remainingAgents };
+    }
+    return { ...state, reservations: nextReservations };
+  }
+  return state;
+}
+
+function releaseReservation(state, reservationId) {
+  if (typeof reservationId !== 'string' || !reservationId || !reservationsOf(state)[reservationId]) return state;
+  const reservations = { ...reservationsOf(state) };
+  delete reservations[reservationId];
+  return { ...state, reservations };
+}
+
+function clearDelegations(state) {
+  return { ...state, reservations: {} };
+}
+
+function reservationForAction(state, actionId) {
+  if (typeof actionId !== 'string' || !actionId) return null;
+  for (const [reservationId, reservation] of Object.entries(reservationsOf(state))) {
+    if (reservation && reservation.actionId === actionId) return reservationId;
+  }
+  return null;
+}
+
+function firstPendingReservation(state) {
+  return Object.entries(reservationsOf(state))
+    .find(([, reservation]) => reservation && reservation.pendingCount > 0)?.[0] || null;
+}
+
+module.exports = {
+  activeDelegationCount,
+  bindSubagent,
+  clearDelegations,
+  firstPendingReservation,
+  releaseReservation,
+  releaseSubagent,
+  reserveDelegation,
+  reservationForAction
 };
 
 },
@@ -510,6 +802,8 @@ module.exports = {
 'use strict';
 
 const nodePath = require('node:path');
+const { DEFAULT_AGENT_LIMIT } = __require("src/contracts.cjs");
+const { activeDelegationCount } = __require("src/delegation-state.cjs");
 
 function decision(outcome, family, reasonCode, explanation, nextStep) {
   return { outcome, family, reasonCode, explanation, nextStep };
@@ -554,6 +848,19 @@ function pathAllowed(path, allowedPaths, cwd) {
 function decide({ contract, action, state = {} }) {
   const mode = contract.mode || 'unconfirmed';
   const level = contract.level || 'watch';
+
+  const delegationCount = action.mutability === 'delegate'
+    ? (Number.isInteger(action.delegationCount) ? action.delegationCount : 1)
+    : 0;
+  if (action.mutability === 'delegate' && state.directiveError) {
+    return decision(
+      'deny_and_explain',
+      'S',
+      'INVALID_DIRECTIVE',
+      `The active Stop That Shit directive is invalid: ${state.directiveError.message || state.directiveError.code || 'unknown directive error'}.`,
+      'Submit a corrected total-agents=N and/or concurrent-agents=N directive before delegating.'
+    );
+  }
 
   if (level === 'off' || mode === 'unconfirmed') {
     return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
@@ -640,21 +947,37 @@ function decide({ contract, action, state = {} }) {
       controlledOutcome(level),
       'S',
       'UNBOUNDED_DELEGATION',
-      'The proposed delegation can fan out to an unbounded number of subagents, so it cannot satisfy agents=N deterministically.',
-      'Use explicit Agent calls within agents=N, or disable the Guard for a deliberately unbounded workflow.'
+      'The proposed delegation can fan out to an unbounded number of subagents, so it cannot satisfy the configured agent limits deterministically.',
+      'Use an explicit bounded delegation batch, or disable the Guard for a deliberately unbounded workflow.'
     );
   }
 
-  const delegationCount = action.mutability === 'delegate'
-    ? (Number.isInteger(action.delegationCount) ? action.delegationCount : 1)
+  const totalAgentBudget = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
+    ? contract.totalAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const concurrentAgentBudget = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
+    ? contract.concurrentAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const totalAgentsUsed = state.delegation && Number.isSafeInteger(state.delegation.totalAgentsUsed)
+    ? state.delegation.totalAgentsUsed
     : 0;
-  if (action.mutability === 'delegate' && contract.agentsUsed + delegationCount > contract.agentBudget) {
+  const activeAgents = activeDelegationCount(state.delegation);
+  if (action.mutability === 'delegate' && totalAgentsUsed + delegationCount > totalAgentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
-      'AGENT_BUDGET_EXHAUSTED',
-      `The active contract allows ${contract.agentBudget} subagent(s), with ${contract.agentsUsed} already used, and this action requires ${delegationCount}.`,
-      'Continue locally or obtain an explicit agents=N contract.'
+      'TOTAL_AGENT_LIMIT',
+      `The session total allows ${totalAgentBudget} subagent(s), with ${totalAgentsUsed} already used, and this action requires ${delegationCount}.`,
+      'Continue locally or increase total-agents=N in a corrected directive.'
+    );
+  }
+  if (action.mutability === 'delegate' && activeAgents + delegationCount > concurrentAgentBudget) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'CONCURRENT_AGENT_LIMIT',
+      `The session allows ${concurrentAgentBudget} active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
+      'Wait for the current delegation to complete or increase concurrent-agents=N in a corrected directive.'
     );
   }
 
@@ -682,6 +1005,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const packageJson = __require("package.json");
 const { PROTOCOL_VERSION } = __require("src/control-protocol.cjs");
+const { activeDelegationCount } = __require("src/delegation-state.cjs");
 const { readAnnotations } = __require("src/runtime-annotations.cjs");
 const { appendJsonl, readJsonl, runtimeRoot } = __require("src/runtime-storage.cjs");
 const { sessionKey } = __require("src/state.cjs");
@@ -697,6 +1021,7 @@ function eventPath(sessionId, options) {
 
 function recordDecision(facts, options = {}) {
   const contract = facts && facts.contract || {};
+  const delegation = facts && facts.delegation || {};
   const state = controlState(contract);
   if (state === 'off') return null;
 
@@ -724,8 +1049,10 @@ function recordDecision(facts, options = {}) {
     contract: {
       mode: String(contract.mode || 'unconfirmed'),
       level: String(contract.level || 'watch'),
-      agentBudget: Number.isInteger(contract.agentBudget) ? contract.agentBudget : 0,
-      agentsUsed: Number.isInteger(contract.agentsUsed) ? contract.agentsUsed : 0,
+      totalAgentBudget: Number.isSafeInteger(contract.totalAgentBudget) ? contract.totalAgentBudget : Number.MAX_SAFE_INTEGER,
+      concurrentAgentBudget: Number.isSafeInteger(contract.concurrentAgentBudget) ? contract.concurrentAgentBudget : Number.MAX_SAFE_INTEGER,
+      totalAgentsUsed: Number.isSafeInteger(delegation.totalAgentsUsed) ? delegation.totalAgentsUsed : 0,
+      activeAgents: activeDelegationCount(delegation),
       hashPolicy: String(contract.hashPolicy || 'deny'),
       dependencyPolicy: String(contract.dependencyPolicy || 'ask'),
       allowedPathCount: Array.isArray(contract.allowedPaths) ? contract.allowedPaths.length : 0
@@ -856,7 +1183,7 @@ module.exports = {
     "pretest": "npm run schema:check",
     "hermes:build": "node scripts/build-hermes-plugin.cjs",
     "hermes:check": "node scripts/build-hermes-plugin.cjs --check",
-    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
+    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
@@ -990,9 +1317,65 @@ function statePath(sessionId, override) {
 
 function freshState() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     contract: defaultContract(),
+    delegation: {
+      totalAgentsUsed: 0,
+      reservations: {},
+      agentIdsSeen: []
+    },
+    directiveError: null,
     lastPromptContext: null
+  };
+}
+
+function safeCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizeDelegation(value, legacyUsed) {
+  const source = value && typeof value === 'object' ? value : {};
+  const reservations = {};
+  if (source.reservations && typeof source.reservations === 'object') {
+    for (const [reservationId, reservation] of Object.entries(source.reservations)) {
+      if (!reservation || typeof reservation !== 'object') continue;
+      reservations[reservationId] = {
+        actionId: typeof reservation.actionId === 'string' ? reservation.actionId : '',
+        pendingCount: safeCount(reservation.pendingCount),
+        agentIds: Array.isArray(reservation.agentIds)
+          ? [...new Set(reservation.agentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
+          : []
+      };
+    }
+  }
+  const hasNewTotal = Number.isSafeInteger(source.totalAgentsUsed) && source.totalAgentsUsed >= 0;
+  return {
+    totalAgentsUsed: hasNewTotal ? source.totalAgentsUsed : safeCount(legacyUsed),
+    reservations,
+    agentIdsSeen: Array.isArray(source.agentIdsSeen)
+      ? [...new Set(source.agentIdsSeen.filter((agentId) => typeof agentId === 'string' && agentId))]
+      : []
+  };
+}
+
+function normalizeState(parsed) {
+  const fresh = freshState();
+  const legacyContract = parsed.contract && typeof parsed.contract === 'object' ? parsed.contract : {};
+  const contract = { ...fresh.contract, ...legacyContract };
+  delete contract.agentBudget;
+  delete contract.agentsUsed;
+  if (!Number.isSafeInteger(contract.totalAgentBudget) || contract.totalAgentBudget < 0) {
+    contract.totalAgentBudget = fresh.contract.totalAgentBudget;
+  }
+  if (!Number.isSafeInteger(contract.concurrentAgentBudget) || contract.concurrentAgentBudget < 0) {
+    contract.concurrentAgentBudget = fresh.contract.concurrentAgentBudget;
+  }
+  return {
+    schemaVersion: 2,
+    contract,
+    delegation: normalizeDelegation(parsed.delegation, legacyContract.agentsUsed),
+    directiveError: parsed.directiveError && typeof parsed.directiveError === 'object' ? parsed.directiveError : null,
+    lastPromptContext: parsed.lastPromptContext ?? null
   };
 }
 
@@ -1000,11 +1383,17 @@ function readState(sessionId, override) {
   const file = statePath(sessionId, override);
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return {
-      ...freshState(),
-      ...parsed,
-      contract: { ...defaultContract(), ...(parsed.contract || {}) }
-    };
+    const normalized = normalizeState(parsed);
+    const hasDelegation = Object.prototype.hasOwnProperty.call(parsed, 'delegation');
+    const hasDirectiveError = Object.prototype.hasOwnProperty.call(parsed, 'directiveError');
+    const hasPromptContext = Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext');
+    const hasAgentIdsSeen = parsed.delegation
+      && typeof parsed.delegation === 'object'
+      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen');
+    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen) {
+      writeState(sessionId, normalized, override);
+    }
+    return normalized;
   } catch (error) {
     if (error && (error.code === 'ENOENT' || error.name === 'SyntaxError')) return freshState();
     throw error;
@@ -1475,7 +1864,7 @@ __modules["package.json"] = function(module) { module.exports = {
     "pretest": "npm run schema:check",
     "hermes:build": "node scripts/build-hermes-plugin.cjs",
     "hermes:check": "node scripts/build-hermes-plugin.cjs --check",
-    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
+    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",

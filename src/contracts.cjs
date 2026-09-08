@@ -4,13 +4,14 @@ const MODES = new Set(['answer', 'review', 'change', 'monitor', 'open']);
 const LEVELS = new Set(['watch', 'guard', 'lock', 'off']);
 const HASH_POLICIES = new Set(['deny', 'ask', 'allow']);
 const SCOPE_POLICIES = new Set(['deny', 'ask', 'allow']);
+const DEFAULT_AGENT_LIMIT = Number.MAX_SAFE_INTEGER;
 
 function defaultContract() {
   return {
     mode: 'unconfirmed',
     level: 'watch',
-    agentBudget: 0,
-    agentsUsed: 0,
+    totalAgentBudget: DEFAULT_AGENT_LIMIT,
+    concurrentAgentBudget: DEFAULT_AGENT_LIMIT,
     hashPolicy: 'deny',
     allowedPaths: null,
     dependencyPolicy: 'ask',
@@ -32,14 +33,38 @@ function parseDirective(prompt) {
 
   const head = directiveHead(prompt, mention.index + mention[0].length);
   const tokens = head.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean);
-  const parsed = { mentioned: true };
+  const parsed = { mentioned: true, error: null };
 
   for (const rawToken of tokens) {
     const token = rawToken.toLowerCase();
     if (MODES.has(token)) parsed.mode = token;
     if (LEVELS.has(token)) parsed.level = token;
-    const agents = /^agents=(\d+)$/.exec(token);
-    if (agents) parsed.agentBudget = Math.min(Number(agents[1]), 8);
+    if (/^agents(?:=|$)/i.test(rawToken)) {
+      parsed.error = {
+        code: 'LEGACY_AGENT_DIRECTIVE',
+        token: rawToken,
+        message: 'The agents=N directive was removed; use total-agents=N and/or concurrent-agents=N.'
+      };
+      break;
+    }
+    const totalAgents = /^total-agents=(.*)$/i.exec(rawToken);
+    if (totalAgents) {
+      const value = parseAgentLimit(totalAgents[1]);
+      if (value === null) {
+        parsed.error = invalidAgentLimit(rawToken);
+        break;
+      }
+      parsed.totalAgentBudget = value;
+    }
+    const concurrentAgents = /^concurrent-agents=(.*)$/i.exec(rawToken);
+    if (concurrentAgents) {
+      const value = parseAgentLimit(concurrentAgents[1]);
+      if (value === null) {
+        parsed.error = invalidAgentLimit(rawToken);
+        break;
+      }
+      parsed.concurrentAgentBudget = value;
+    }
     const hash = /^hash=(deny|ask|allow)$/.exec(token);
     if (hash && HASH_POLICIES.has(hash[1])) parsed.hashPolicy = hash[1];
     const files = /^files=(.*)$/i.exec(rawToken);
@@ -49,6 +74,20 @@ function parseDirective(prompt) {
   }
 
   return parsed;
+}
+
+function parseAgentLimit(value) {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function invalidAgentLimit(token) {
+  return {
+    code: 'INVALID_AGENT_LIMIT',
+    token,
+    message: `${token} must be a non-negative safe integer.`
+  };
 }
 
 function naturalCorrection(prompt, previous) {
@@ -78,24 +117,37 @@ function naturalCorrection(prompt, previous) {
 
 function parseContractPrompt(prompt, previousContract = defaultContract()) {
   const previous = { ...defaultContract(), ...previousContract };
+  delete previous.agentBudget;
+  delete previous.agentsUsed;
   const directive = parseDirective(String(prompt || ''));
   const correction = naturalCorrection(String(prompt || ''), previous);
   const next = { ...previous };
   let changed = false;
 
   if (directive) {
+    if (directive.error) {
+      return {
+        contract: previous,
+        changed: false,
+        directive: true,
+        correction: Boolean(correction),
+        error: directive.error
+      };
+    }
     if (directive.mode && directive.mode !== next.mode) {
       next.mode = directive.mode;
-      next.agentsUsed = 0;
       changed = true;
     }
     if (directive.level && directive.level !== next.level) {
       next.level = directive.level;
       changed = true;
     }
-    if (Number.isInteger(directive.agentBudget) && directive.agentBudget !== next.agentBudget) {
-      next.agentBudget = directive.agentBudget;
-      next.agentsUsed = 0;
+    if (Number.isInteger(directive.totalAgentBudget) && directive.totalAgentBudget !== next.totalAgentBudget) {
+      next.totalAgentBudget = directive.totalAgentBudget;
+      changed = true;
+    }
+    if (Number.isInteger(directive.concurrentAgentBudget) && directive.concurrentAgentBudget !== next.concurrentAgentBudget) {
+      next.concurrentAgentBudget = directive.concurrentAgentBudget;
       changed = true;
     }
     if (directive.hashPolicy && directive.hashPolicy !== next.hashPolicy) {
@@ -121,7 +173,6 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
   } else if (correction) {
     if (correction.mode !== next.mode) {
       next.mode = correction.mode;
-      next.agentsUsed = 0;
       changed = true;
     }
     if (next.level === 'watch') {
@@ -135,7 +186,7 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
     next.level = 'watch';
   }
 
-  return { contract: next, changed, directive: Boolean(directive), correction: Boolean(correction) };
+  return { contract: next, changed, directive: Boolean(directive), correction: Boolean(correction), error: null };
 }
 
 module.exports = {
@@ -143,6 +194,7 @@ module.exports = {
   SCOPE_POLICIES,
   LEVELS,
   MODES,
+  DEFAULT_AGENT_LIMIT,
   defaultContract,
   parseContractPrompt
 };

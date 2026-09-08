@@ -90,6 +90,20 @@ Use a hard file lock only when the complete boundary is already known:
 $stop-that-shit lock change files=src/config.cjs|test/config.test.cjs -- Fix this behavior.
 ```
 
+Delegation limits are independent session controls:
+
+```text
+$stop-that-shit change total-agents=N concurrent-agents=M -- Run the task.
+```
+
+`total-agents` counts every child successfully reserved in the session and is
+not refunded or reset when the contract changes. `concurrent-agents` counts
+active reservation units and is released by explicit completion, subagent-stop,
+or session-end events. Both limits apply together, default to
+`Number.MAX_SAFE_INTEGER`, and accept `0` to forbid delegation. A batch that
+exceeds either limit is rejected atomically. The removed `agents=N` directive
+returns a migration error and does not partially update the contract.
+
 Claude Code equivalent:
 
 ```text

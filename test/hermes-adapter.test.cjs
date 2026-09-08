@@ -56,7 +56,29 @@ function pre(session, toolName, toolInput, cwd = root) {
     tool_input: toolInput,
     session_id: session,
     cwd,
-    extra: { user_message: '' }
+    tool_call_id: `${toolName}-call`,
+    extra: { user_message: '', tool_call_id: `${toolName}-call` }
+  });
+}
+
+function post(session, toolName, toolInput, toolCallId = `${toolName}-call`, extra = {}) {
+  return hermesEnvelope({
+    hook_event_name: 'post_tool_call',
+    tool_name: toolName,
+    tool_input: toolInput,
+    tool_call_id: toolCallId,
+    session_id: session,
+    extra: { user_message: '', tool_call_id: toolCallId, ...extra }
+  });
+}
+
+function lifecycle(session, hookEventName, extra = {}) {
+  return hermesEnvelope({
+    hook_event_name: hookEventName,
+    tool_name: null,
+    tool_input: null,
+    session_id: session,
+    extra
   });
 }
 
@@ -75,6 +97,46 @@ test('maps real Hermes hook envelope fields to ControlEvent v1', () => {
   assert.equal(actionEvent.action.mutability, 'write');
   assert.deepEqual(actionEvent.action.affectedPaths, ['notes.txt']);
   assert.equal(actionEvent.action.cwd, root);
+});
+
+test('maps Hermes post-tool and lifecycle envelopes to ControlEvent v1', () => {
+  const { toControlEvent } = adapter();
+
+  const afterEvent = toControlEvent(post('lifecycle-session', 'delegate_task', {
+    goal: 'inspect the changed files'
+  }, 'delegate-call', { result: 'done', status: 'success' }));
+  assert.equal(afterEvent.kind, 'action.after');
+  assert.equal(afterEvent.sessionId, 'lifecycle-session');
+  assert.equal(afterEvent.action.id, 'delegate-call');
+
+  const startEvent = toControlEvent(lifecycle('lifecycle-session', 'subagent_start', {
+    parent_session_id: 'lifecycle-session',
+    parent_turn_id: 'turn-2',
+    child_session_id: 'child-session',
+    child_subagent_id: 'child-agent',
+    reservation_id: 'reservation:delegate-call',
+    child_goal: 'inspect the changed files'
+  }));
+  assert.equal(startEvent.kind, 'subagent.start');
+  assert.equal(startEvent.sessionId, 'lifecycle-session');
+  assert.equal(startEvent.turnId, 'turn-2');
+  assert.equal(startEvent.agentId, 'child-session');
+  assert.equal(startEvent.reservationId, 'reservation:delegate-call');
+
+  const stopEvent = toControlEvent(lifecycle('lifecycle-session', 'subagent_stop', {
+    parent_session_id: 'lifecycle-session',
+    child_session_id: 'child-session',
+    child_status: 'completed'
+  }));
+  assert.equal(stopEvent.kind, 'subagent.stop');
+  assert.equal(stopEvent.agentId, 'child-session');
+
+  const endEvent = toControlEvent(lifecycle('lifecycle-session', 'on_session_end', {
+    completed: true,
+    interrupted: false
+  }));
+  assert.equal(endEvent.kind, 'session.end');
+  assert.equal(endEvent.sessionId, 'lifecycle-session');
 });
 
 test('classifies only the explicit Hermes tool table and reuses shell evidence', () => {
@@ -246,30 +308,61 @@ test('Hermes dependency declarations are detected across every real file mutatio
 test('delegate_task reserves the complete batch or leaves the budget unchanged', (t) => {
   const { handleHermesHook } = adapter();
   const options = workspace(t);
-  handleHermesHook(prompt('batch-denied', '$stop-that-shit change agents=1 -- delegate once'), options);
+  handleHermesHook(prompt('batch-denied', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- delegate once'), options);
   const denied = handleHermesHook(pre('batch-denied', 'delegate_task', {
     tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
   }), options);
-  assert.match(denied.message, /S\/AGENT_BUDGET_EXHAUSTED/);
-  assert.equal(readState('batch-denied', options.dataDir).contract.agentsUsed, 0);
+  assert.match(denied.message, /S\/(?:TOTAL_AGENT_LIMIT|CONCURRENT_AGENT_LIMIT)/);
+  assert.equal(readState('batch-denied', options.dataDir).delegation.totalAgentsUsed, 0);
 
-  handleHermesHook(prompt('batch-allowed', '$stop-that-shit change agents=2 -- delegate twice'), options);
+  handleHermesHook(prompt('batch-allowed', '$stop-that-shit change total-agents=2 concurrent-agents=2 -- delegate twice'), options);
   assert.equal(handleHermesHook(pre('batch-allowed', 'delegate_task', {
     tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
   }), options), null);
-  assert.equal(readState('batch-allowed', options.dataDir).contract.agentsUsed, 2);
+  assert.equal(readState('batch-allowed', options.dataDir).delegation.totalAgentsUsed, 2);
+});
+
+test('Hermes lifecycle hooks release subagents and clear reservations without output', (t) => {
+  const { handleHermesHook } = adapter();
+  const options = workspace(t);
+  handleHermesHook(prompt('lifecycle-session', '$stop-that-shit change total-agents=2 concurrent-agents=2 -- delegate'), options);
+  assert.equal(handleHermesHook(pre('lifecycle-session', 'delegate_task', {
+    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
+  }), options), null);
+  assert.equal(readState('lifecycle-session', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 2);
+
+  assert.equal(handleHermesHook(lifecycle('lifecycle-session', 'subagent_start', {
+    child_session_id: 'child-session',
+    reservation_id: 'reservation:delegate_task-call'
+  }), options), null);
+  assert.equal(readState('lifecycle-session', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 1);
+
+  assert.equal(handleHermesHook(lifecycle('lifecycle-session', 'subagent_stop', {
+    child_session_id: 'child-session'
+  }), options), null);
+  assert.equal(readState('lifecycle-session', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 1);
+
+  assert.equal(handleHermesHook(post('lifecycle-session', 'delegate_task', {
+    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
+  }), options), null);
+  assert.deepEqual(readState('lifecycle-session', options.dataDir).delegation.reservations, {});
+
+  handleHermesHook(prompt('end-session', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- delegate'), options);
+  handleHermesHook(pre('end-session', 'delegate_task', { goal: 'inspect once' }), options);
+  assert.equal(handleHermesHook(lifecycle('end-session', 'on_session_end'), options), null);
+  assert.deepEqual(readState('end-session', options.dataDir).delegation.reservations, {});
 });
 
 test('Hermes delegation control actions do not consume agent budget', (t) => {
   const { handleHermesHook } = adapter();
   const options = workspace(t);
-  handleHermesHook(prompt('delegate-control', '$stop-that-shit change agents=1 -- manage delegation'), options);
+  handleHermesHook(prompt('delegate-control', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- manage delegation'), options);
   for (const action of ['list', 'steer', 'stop']) {
     assert.equal(handleHermesHook(pre('delegate-control', 'delegate_task', { action }), options), null);
-    assert.equal(readState('delegate-control', options.dataDir).contract.agentsUsed, 0);
+    assert.equal(readState('delegate-control', options.dataDir).delegation.totalAgentsUsed, 0);
   }
   assert.equal(handleHermesHook(pre('delegate-control', 'delegate_task', { goal: 'inspect' }), options), null);
-  assert.equal(readState('delegate-control', options.dataDir).contract.agentsUsed, 1);
+  assert.equal(readState('delegate-control', options.dataDir).delegation.totalAgentsUsed, 1);
 });
 
 test('unknown hook events and empty payloads are not applicable', () => {

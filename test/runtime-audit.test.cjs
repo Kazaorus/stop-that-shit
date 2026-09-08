@@ -28,8 +28,8 @@ function facts(overrides = {}) {
     contract: {
       mode: 'review',
       level: 'guard',
-      agentBudget: 0,
-      agentsUsed: 0,
+      totalAgentBudget: 3,
+      concurrentAgentBudget: 2,
       hashPolicy: 'deny',
       dependencyPolicy: 'ask',
       allowedPaths: ['private/project/secret.cjs']
@@ -83,10 +83,20 @@ test('runtime audit records delegation count without task input', (t) => {
       mutability: 'delegate',
       delegationCount: 2,
       input: { tasks: [{ goal: 'PRIVATE_DELEGATION_GOAL' }] }
+    },
+    delegation: {
+      totalAgentsUsed: 2,
+      reservations: { 'reservation:private': { actionId: 'private', pendingCount: 1, agentIds: ['private-agent'] } }
     }
   }), { dataDir: directory });
   const runtime = readRuntime({ sessionId: 'private-session-id' }, { dataDir: directory });
   assert.equal(runtime.events[0].action.delegationCount, 2);
+  assert.equal(runtime.events[0].contract.totalAgentBudget, 3);
+  assert.equal(runtime.events[0].contract.concurrentAgentBudget, 2);
+  assert.equal(runtime.events[0].contract.totalAgentsUsed, 2);
+  assert.equal(runtime.events[0].contract.activeAgents, 2);
+  assert.equal('agentBudget' in runtime.events[0].contract, false);
+  assert.equal('agentsUsed' in runtime.events[0].contract, false);
   assert.equal(JSON.stringify(runtime).includes('PRIVATE_DELEGATION_GOAL'), false);
 });
 

@@ -263,8 +263,18 @@ Add a boundary when you know it in advance:
 $stop-that-shit lock change files=src/config.cjs|test/config.test.cjs -- Fix this behavior.
 $stop-that-shit change deps=allow -- Add the requested parser dependency.
 $stop-that-shit change hash=allow -- Generate the requested release checksum.
-$stop-that-shit change agents=1 -- Use one independent test shard.
+$stop-that-shit change total-agents=1 concurrent-agents=1 -- Use one independent test shard.
 ```
+
+`total-agents=N` is the cumulative number of child agents successfully reserved
+in the session; changing the limits in that session does not reset it.
+`concurrent-agents=N` is the number of active reservation units. Both limits
+apply at the same time. When omitted, both default to
+`Number.MAX_SAFE_INTEGER`; `0` forbids delegation. If a batch exceeds either
+limit, the whole batch is rejected without queueing or partial execution.
+Explicit `action.after`, subagent-stop, or session-end events release active
+slots but never refund the cumulative total. The removed `agents=N` directive
+returns a migration error.
 
 Skip `files=` when you do not know every affected file. Codex should inspect the
 real call path and update the callers, fixtures, or tests needed to finish the
@@ -293,7 +303,7 @@ effect. Stop That Shit reports host effect as `unobserved`.
 | --- | --- | --- |
 | Write during `review`, `answer`, or `monitor` | Stop | Switch to `change` |
 | Add a dependency | Ask | `deps=allow` |
-| Launch a subagent | Stop above budget | `agents=N` |
+| Launch a subagent | Stop above total or concurrent limit | `total-agents=N concurrent-agents=M` |
 | Add a recognized hash operation | Stop | `hash=allow` |
 | Write outside a file lock | Stop | Expand `files=` |
 

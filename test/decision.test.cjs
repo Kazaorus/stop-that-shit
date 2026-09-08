@@ -20,7 +20,7 @@ for (const file of fs.readdirSync(casesRoot).filter((name) => name.endsWith('.js
 
 test('classification precedence chooses I before H and S', () => {
   const actual = decide({
-    contract: { mode: 'review', level: 'guard', agentBudget: 0, agentsUsed: 0 },
+    contract: { mode: 'review', level: 'guard' },
     action: {
       mutability: 'write',
       duplicate: true,
@@ -76,29 +76,56 @@ test('file boundary requires approval when an unknown action omits affected path
   assert.equal(actual.reasonCode, 'WRITE_PATH_UNPROVEN');
 });
 
-test('delegation budget checks the complete requested child count', () => {
+test('delegation limits check complete batch count against total and active usage', () => {
   const allowed = decide({
-    contract: { mode: 'change', level: 'guard', agentBudget: 3, agentsUsed: 1 },
+    contract: { mode: 'change', level: 'guard', totalAgentBudget: 3, concurrentAgentBudget: 3 },
+    state: { delegation: { totalAgentsUsed: 1, reservations: {} } },
     action: { mutability: 'delegate', delegationCount: 2 }
   });
-  const denied = decide({
-    contract: { mode: 'change', level: 'guard', agentBudget: 2, agentsUsed: 1 },
+  const totalDenied = decide({
+    contract: { mode: 'change', level: 'guard', totalAgentBudget: 2, concurrentAgentBudget: 4 },
+    state: { delegation: { totalAgentsUsed: 1, reservations: {} } },
     action: { mutability: 'delegate', delegationCount: 2 }
   });
-  const legacy = decide({
-    contract: { mode: 'change', level: 'guard', agentBudget: 2, agentsUsed: 1 },
+  const concurrentDenied = decide({
+    contract: { mode: 'change', level: 'guard', totalAgentBudget: 4, concurrentAgentBudget: 2 },
+    state: {
+      delegation: {
+        totalAgentsUsed: 1,
+        reservations: { 'reservation-1': { pendingCount: 1, agentIds: [] } }
+      }
+    },
+    action: { mutability: 'delegate', delegationCount: 2 }
+  });
+  const zeroDenied = decide({
+    contract: { mode: 'change', level: 'guard', totalAgentBudget: 0, concurrentAgentBudget: 0 },
+    action: { mutability: 'delegate', delegationCount: 1 }
+  });
+  const defaultLimit = decide({
+    contract: { mode: 'change', level: 'guard' },
     action: { mutability: 'delegate' }
   });
 
   assert.equal(allowed.outcome, 'allow');
-  assert.equal(denied.reasonCode, 'AGENT_BUDGET_EXHAUSTED');
-  assert.match(denied.explanation, /requires 2/);
-  assert.equal(legacy.outcome, 'allow');
+  assert.equal(totalDenied.reasonCode, 'TOTAL_AGENT_LIMIT');
+  assert.match(totalDenied.explanation, /requires 2/);
+  assert.equal(concurrentDenied.reasonCode, 'CONCURRENT_AGENT_LIMIT');
+  assert.equal(zeroDenied.reasonCode, 'TOTAL_AGENT_LIMIT');
+  assert.equal(defaultLimit.outcome, 'allow');
+});
+
+test('invalid directives block delegation before budget checks', () => {
+  const actual = decide({
+    contract: { mode: 'change', level: 'guard', totalAgentBudget: 4, concurrentAgentBudget: 4 },
+    state: { directiveError: { code: 'INVALID_AGENT_LIMIT' } },
+    action: { mutability: 'delegate', delegationCount: 1 }
+  });
+  assert.equal(actual.reasonCode, 'INVALID_DIRECTIVE');
 });
 
 test('unbounded delegation takes precedence over a finite requested count', () => {
   const actual = decide({
-    contract: { mode: 'change', level: 'guard', agentBudget: 1, agentsUsed: 1 },
+    contract: { mode: 'change', level: 'guard', totalAgentBudget: 1, concurrentAgentBudget: 1 },
     action: { mutability: 'delegate', delegationCount: 1, unboundedDelegation: true }
   });
   assert.equal(actual.reasonCode, 'UNBOUNDED_DELEGATION');

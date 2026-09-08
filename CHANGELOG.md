@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-No unreleased changes yet.
+- **Agent limit split**：将已移除的 `agents=N` 拆分为
+  `total-agents=N` 与 `concurrent-agents=M`。session 总量累计计费，活动
+  reservation 按生命周期释放；两个限制同时检查，batch 超限整批拒绝，旧
+  指令返回迁移错误。/ Split the removed `agents=N` directive into
+  `total-agents=N` and `concurrent-agents=M`. Total usage is cumulative,
+  active reservations release on lifecycle completion, both limits apply
+  atomically, and legacy directives return a migration error.
 
 ## 0.2.1 — 2026-09-03 (Scoped Guard false-allow fixes / 受限 Guard 误放行修复)
 

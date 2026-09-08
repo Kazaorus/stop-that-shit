@@ -8,7 +8,7 @@
     "bad": {
       "id": "delegation-bad",
       "title": "A single-file fix does not need a subagent",
-      "contract": "lock change files=src/banner.cjs agents=0",
+      "contract": "lock change files=src/banner.cjs total-agents=0 concurrent-agents=0",
       "task": "Change src/banner.cjs so node test/banner.test.cjs passes, then run that focused test. Complete this single-file task locally without subagents or parallel workflows.",
       "fixture": "fixtures/bad",
       "acceptance": [
@@ -20,7 +20,7 @@
     "good": {
       "id": "delegation-good",
       "title": "An explicit bounded inspection gives one subagent a job",
-      "contract": "lock change files=src/banner.cjs agents=1",
+      "contract": "lock change files=src/banner.cjs total-agents=1 concurrent-agents=1",
       "task": "Use exactly one subagent to inspect src/banner.cjs and test/banner.test.cjs and report the required return value. Then make the fix yourself and run node test/banner.test.cjs. Do not delegate any other work.",
       "fixture": "fixtures/good",
       "acceptance": [

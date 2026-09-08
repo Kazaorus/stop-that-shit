@@ -30,30 +30,40 @@ Pi Extension          ----> Pi Adapter -----------/  decision(contract, action)
 - `.hermes-plugin/__init__.py` is the only Hermes host entrypoint and bridges
   native Plugin callbacks to the bundled runtime.
 - `pi/stop-that-shit.ts` is the Pi package entrypoint.
-- `src/state.cjs` stores per-session contract state and serializes delegation
-  reservations so concurrent Hook processes cannot oversubscribe `agents=N`.
+- `src/state.cjs` stores schema-2 per-session contract state and serializes the
+  delegation ledger so concurrent Hook processes cannot oversubscribe either
+  agent limit.
+- `src/delegation-state.cjs` owns pure reservation transitions. Total usage is
+  consumed by `action.before`; active reservation units are released by
+  `action.after`, `subagent.stop`, or `session.end`. The ledger also keeps
+  session-local agent IDs already seen by lifecycle events so delayed duplicate
+  starts cannot bind a later reservation; this metadata is not active usage or
+  runtime audit data.
 - `src/runtime-audit.cjs` appends and reads metadata-only decision events.
 - `src/runtime-annotations.cjs` appends independent human labels.
 
 ## Host event boundaries
 
-Codex keeps the original two packaged events: `UserPromptSubmit` and
-`PreToolUse`. Claude Code packages `SessionStart`, `UserPromptSubmit`,
-`PreToolUse`, and `SubagentStart`. Only `PreToolUse` is used for hard action
-denial; lifecycle events inject or update the shared contract. Direct Skill
-invocation arrives through `UserPromptSubmit`, which also keeps arming working
-on hosts that do not expose the optional `UserPromptExpansion` event; the
-adapter retains its `UserPromptExpansion` handler for hosts that register it.
+Codex maps `UserPromptSubmit` to `prompt.submit`, `PreToolUse` to
+`action.before`, `SubagentStart`/`SubagentStop` to the matching lifecycle
+events, `PostToolUse` to `action.after`, and `SessionEnd` to `session.end`.
+Claude Code uses the same lifecycle mapping with its `Agent` tool's
+`tool_use_id` and `agent_id`; `UserPromptExpansion` remains an optional prompt
+surface. Prompt-capable hosts return a native prompt block for invalid legacy
+or malformed directives, while the controller also records the error and
+rejects later delegation until a valid directive arrives.
 
-Hermes native Plugin maps exactly two lifecycle events:
+Hermes native Plugin maps the following lifecycle events:
 
 ```text
 pre_llm_call  -> prompt.submit  -> {"context":"..."} when context is returned
 pre_tool_call -> action.before  -> {"action":"block","message":"..."} on denial
+post_tool_call -> action.after
+subagent_start/subagent_stop -> subagent.start/subagent.stop
+on_session_end -> session.end
 ```
 
-Hermes does not register `subagent_start` or `subagent_stop`, because observer
-events cannot deny the `delegate_task` action. The explicit Hermes tool table
+The explicit Hermes tool table
 covers `write_file`, `patch`, `delegate_task`, `read_file`, `search_files`,
 `web_search`, `web_extract`, `vision_analyze`, `clarify`, and `todo`. `terminal`
 reuses the existing shell classifier. `execute_code`, browser/computer-use,
@@ -61,10 +71,12 @@ memory, cron, Skill management, message sending, and all other unlisted
 built-in/plugin/MCP tools remain `unknown`; an armed contract blocks unknown
 mutability rather than guessing.
 
-A Hermes `delegate_task` call reserves `agents=N` budget by the number of child
-agents it can start: one for a non-empty `goal`, or `tasks.length` for a batch.
-The complete count is checked and reserved atomically before the tool runs; an
-insufficient budget rejects the whole batch without consuming any units.
+A Hermes `delegate_task` call reserves the total and concurrent limits by the
+number of child agents it can start: one for a non-empty `goal`, or
+`tasks.length` for a batch. The complete count is checked and reserved
+atomically before the tool runs; an insufficient limit rejects the whole batch
+without consuming any units. Completion events release active units but never
+refund the cumulative total.
 `action=list`, `action=steer`, and `action=stop` are control operations and
 consume zero budget units.
 
@@ -103,7 +115,7 @@ Hard decisions are limited to observable facts:
 - writes in a confirmed non-mutating mode;
 - writes outside an optional explicit `files=` list;
 - covered dependency additions without authority;
-- subagent launches beyond `agents=N`;
+- subagent launches beyond `total-agents=N` or `concurrent-agents=N`;
 - high-confidence hashing without `hash=allow`.
 
 Every observing or armed check is recorded even when the policy allows it, so

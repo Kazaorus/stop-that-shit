@@ -1089,8 +1089,8 @@ test('offline rescore recomputes a path-bound host smoke from archived runtime e
     contract: {
       mode: 'review',
       level: 'guard',
-      agentBudget: 0,
-      agentsUsed: 0,
+      totalAgentBudget: Number.MAX_SAFE_INTEGER,
+      concurrentAgentBudget: Number.MAX_SAFE_INTEGER,
       hashPolicy: 'deny',
       dependencyPolicy: 'ask',
       allowedPaths: []

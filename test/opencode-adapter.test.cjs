@@ -7,8 +7,11 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   handleOpenCodeMessage,
+  handleOpenCodeSessionEnd,
   handleOpenCodeTool,
+  handleOpenCodeToolAfter,
   promptText,
+  toActionAfterEvent,
   toActionEvent
 } = require('../src/adapters/opencode-hooks.cjs');
 const {
@@ -49,6 +52,31 @@ test('OpenCode Adapter maps native tool fields to ControlEvent v1', () => {
   assert.equal(event.action.mutability, 'write');
   assert.deepEqual(event.action.affectedPaths, ['src/config.cjs']);
   assert.equal(event.action.cwd, '/repo');
+});
+
+test('OpenCode Adapter maps tool completion and session end to ControlEvent v1', (t) => {
+  const options = workspace(t);
+  const after = toActionAfterEvent(
+    { tool: 'task', sessionID: 'child', callID: 'task-1' },
+    { controlSessionID: 'root' }
+  );
+
+  assert.equal(after.kind, 'action.after');
+  assert.equal(after.sessionId, 'root');
+  assert.equal(after.action.id, 'task-1');
+
+  const end = handleOpenCodeSessionEnd(
+    { sessionID: 'root' },
+    {},
+    options
+  );
+  assert.equal(end.kind, 'context');
+  assert.equal(handleOpenCodeToolAfter(
+    { tool: 'task', sessionID: 'root', callID: 'task-1' },
+    {},
+    {},
+    options
+  ).kind, 'none');
 });
 
 test('OpenCode prompt extraction ignores synthetic host messages', () => {

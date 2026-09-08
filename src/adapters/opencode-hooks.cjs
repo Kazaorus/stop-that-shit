@@ -59,6 +59,27 @@ function toActionEvent(input, output, context = {}) {
   };
 }
 
+function toActionAfterEvent(input, context = {}) {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    kind: 'action.after',
+    sessionId: String(context.controlSessionID || input && input.sessionID || ''),
+    host: hostMetadata(input),
+    action: {
+      id: String(input && (input.callID || input.callId) || '')
+    }
+  };
+}
+
+function toSessionEndEvent(input, context = {}) {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    kind: 'session.end',
+    sessionId: String(context.controlSessionID || input && input.sessionID || ''),
+    host: hostMetadata(input)
+  };
+}
+
 function controllerOptions(options) {
   return { ...options, denialResponseOutcome: 'execution_denial_returned' };
 }
@@ -71,10 +92,22 @@ function handleOpenCodeTool(input, output, context = {}, options = {}) {
   return handleControlEvent(toActionEvent(input, output, context), controllerOptions(options));
 }
 
+function handleOpenCodeToolAfter(input, output, context = {}, options = {}) {
+  return handleControlEvent(toActionAfterEvent(input, context), controllerOptions(options));
+}
+
+function handleOpenCodeSessionEnd(input, context = {}, options = {}) {
+  return handleControlEvent(toSessionEndEvent(input, context), controllerOptions(options));
+}
+
 module.exports = {
   handleOpenCodeMessage,
+  handleOpenCodeSessionEnd,
   handleOpenCodeTool,
+  handleOpenCodeToolAfter,
   promptText,
+  toActionAfterEvent,
   toActionEvent,
+  toSessionEndEvent,
   toPromptEvent
 };

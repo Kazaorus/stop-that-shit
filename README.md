@@ -28,7 +28,7 @@
 我也试过不断往 `AGENTS.md` 里补「不要乱改」「别过度设计」「没让我做的先别做」。规则越补越长，`AGENTS.md` 自己也开始造史。Stop That Shit 把其中能明确判断的边界做成 Skill 和可执行 Guard。
 
 你用 `review`、`change` 等模式写明授权，再按需限制文件、依赖、hash 和 subagent
-预算。Stop That Shit 在受覆盖的 Hook 路径上检查这些明确边界。Agent 仍然可以读
+总量与并发量。Stop That Shit 在受覆盖的 Hook 路径上检查这些明确边界。Agent 仍然可以读
 仓库，也必须处理真正受影响的调用方。Guard 确认某个动作越界时，会返回一枚红章：
 
 ```text
@@ -225,8 +225,15 @@ $stop-that-shit review -- Review 这个 diff，只报告问题，不要修改。
 $stop-that-shit lock change files=src/config.cjs|test/config.test.cjs -- 修复这个行为。
 $stop-that-shit change deps=allow -- 添加我要求的解析器依赖。
 $stop-that-shit change hash=allow -- 生成我要求的发布校验和。
-$stop-that-shit change agents=1 -- 使用一个独立测试 subagent。
+$stop-that-shit change total-agents=1 concurrent-agents=1 -- 使用一个独立测试 subagent。
 ```
+
+`total-agents=N` 是当前 session 内成功预留过的 child 总量，累计使用且不会因
+修改同一 session 的限制而重置；`concurrent-agents=N` 是当前活动 reservation
+占用的并发槽位。两个限制同时生效，未设置时均为 `Number.MAX_SAFE_INTEGER`，
+设置为 `0` 会禁止 delegation。一次 batch 超出任一限制时整批拒绝，不排队也不
+部分执行；明确的 `action.after`、subagent stop 或 session end 会释放并发槽位，
+但不会退还总量。旧的 `agents=N` 已移除，会返回迁移错误。
 
 不知道全部受影响文件时，不要硬写 `files=`。让 agent 沿真实调用链检查，把完成任务必需的 caller、fixture 和测试一起改完。
 
@@ -249,7 +256,7 @@ $stop-that-shit label evt_... correct|incorrect|inconclusive
 | --- | --- | --- |
 | 在 `review`、`answer` 或 `monitor` 中写文件 | 停止 | 切换到 `change` |
 | 添加依赖 | 询问 | `deps=allow` |
-| 启动 subagent | 超出预算时停止 | `agents=N` |
+| 启动 subagent | 超出总量或并发量时停止 | `total-agents=N concurrent-agents=M` |
 | 添加可识别的 hash 操作 | 停止 | `hash=allow` |
 | 写入文件锁之外的路径 | 停止 | 扩大 `files=` |
 

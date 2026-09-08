@@ -1,6 +1,8 @@
 'use strict';
 
 const nodePath = require('node:path');
+const { DEFAULT_AGENT_LIMIT } = require('./contracts.cjs');
+const { activeDelegationCount } = require('./delegation-state.cjs');
 
 function decision(outcome, family, reasonCode, explanation, nextStep) {
   return { outcome, family, reasonCode, explanation, nextStep };
@@ -45,6 +47,19 @@ function pathAllowed(path, allowedPaths, cwd) {
 function decide({ contract, action, state = {} }) {
   const mode = contract.mode || 'unconfirmed';
   const level = contract.level || 'watch';
+
+  const delegationCount = action.mutability === 'delegate'
+    ? (Number.isInteger(action.delegationCount) ? action.delegationCount : 1)
+    : 0;
+  if (action.mutability === 'delegate' && state.directiveError) {
+    return decision(
+      'deny_and_explain',
+      'S',
+      'INVALID_DIRECTIVE',
+      `The active Stop That Shit directive is invalid: ${state.directiveError.message || state.directiveError.code || 'unknown directive error'}.`,
+      'Submit a corrected total-agents=N and/or concurrent-agents=N directive before delegating.'
+    );
+  }
 
   if (level === 'off' || mode === 'unconfirmed') {
     return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
@@ -131,21 +146,37 @@ function decide({ contract, action, state = {} }) {
       controlledOutcome(level),
       'S',
       'UNBOUNDED_DELEGATION',
-      'The proposed delegation can fan out to an unbounded number of subagents, so it cannot satisfy agents=N deterministically.',
-      'Use explicit Agent calls within agents=N, or disable the Guard for a deliberately unbounded workflow.'
+      'The proposed delegation can fan out to an unbounded number of subagents, so it cannot satisfy the configured agent limits deterministically.',
+      'Use an explicit bounded delegation batch, or disable the Guard for a deliberately unbounded workflow.'
     );
   }
 
-  const delegationCount = action.mutability === 'delegate'
-    ? (Number.isInteger(action.delegationCount) ? action.delegationCount : 1)
+  const totalAgentBudget = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
+    ? contract.totalAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const concurrentAgentBudget = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
+    ? contract.concurrentAgentBudget
+    : DEFAULT_AGENT_LIMIT;
+  const totalAgentsUsed = state.delegation && Number.isSafeInteger(state.delegation.totalAgentsUsed)
+    ? state.delegation.totalAgentsUsed
     : 0;
-  if (action.mutability === 'delegate' && contract.agentsUsed + delegationCount > contract.agentBudget) {
+  const activeAgents = activeDelegationCount(state.delegation);
+  if (action.mutability === 'delegate' && totalAgentsUsed + delegationCount > totalAgentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
-      'AGENT_BUDGET_EXHAUSTED',
-      `The active contract allows ${contract.agentBudget} subagent(s), with ${contract.agentsUsed} already used, and this action requires ${delegationCount}.`,
-      'Continue locally or obtain an explicit agents=N contract.'
+      'TOTAL_AGENT_LIMIT',
+      `The session total allows ${totalAgentBudget} subagent(s), with ${totalAgentsUsed} already used, and this action requires ${delegationCount}.`,
+      'Continue locally or increase total-agents=N in a corrected directive.'
+    );
+  }
+  if (action.mutability === 'delegate' && activeAgents + delegationCount > concurrentAgentBudget) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'CONCURRENT_AGENT_LIMIT',
+      `The session allows ${concurrentAgentBudget} active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
+      'Wait for the current delegation to complete or increase concurrent-agents=N in a corrected directive.'
     );
   }
 

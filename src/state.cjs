@@ -20,9 +20,65 @@ function statePath(sessionId, override) {
 
 function freshState() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     contract: defaultContract(),
+    delegation: {
+      totalAgentsUsed: 0,
+      reservations: {},
+      agentIdsSeen: []
+    },
+    directiveError: null,
     lastPromptContext: null
+  };
+}
+
+function safeCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizeDelegation(value, legacyUsed) {
+  const source = value && typeof value === 'object' ? value : {};
+  const reservations = {};
+  if (source.reservations && typeof source.reservations === 'object') {
+    for (const [reservationId, reservation] of Object.entries(source.reservations)) {
+      if (!reservation || typeof reservation !== 'object') continue;
+      reservations[reservationId] = {
+        actionId: typeof reservation.actionId === 'string' ? reservation.actionId : '',
+        pendingCount: safeCount(reservation.pendingCount),
+        agentIds: Array.isArray(reservation.agentIds)
+          ? [...new Set(reservation.agentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
+          : []
+      };
+    }
+  }
+  const hasNewTotal = Number.isSafeInteger(source.totalAgentsUsed) && source.totalAgentsUsed >= 0;
+  return {
+    totalAgentsUsed: hasNewTotal ? source.totalAgentsUsed : safeCount(legacyUsed),
+    reservations,
+    agentIdsSeen: Array.isArray(source.agentIdsSeen)
+      ? [...new Set(source.agentIdsSeen.filter((agentId) => typeof agentId === 'string' && agentId))]
+      : []
+  };
+}
+
+function normalizeState(parsed) {
+  const fresh = freshState();
+  const legacyContract = parsed.contract && typeof parsed.contract === 'object' ? parsed.contract : {};
+  const contract = { ...fresh.contract, ...legacyContract };
+  delete contract.agentBudget;
+  delete contract.agentsUsed;
+  if (!Number.isSafeInteger(contract.totalAgentBudget) || contract.totalAgentBudget < 0) {
+    contract.totalAgentBudget = fresh.contract.totalAgentBudget;
+  }
+  if (!Number.isSafeInteger(contract.concurrentAgentBudget) || contract.concurrentAgentBudget < 0) {
+    contract.concurrentAgentBudget = fresh.contract.concurrentAgentBudget;
+  }
+  return {
+    schemaVersion: 2,
+    contract,
+    delegation: normalizeDelegation(parsed.delegation, legacyContract.agentsUsed),
+    directiveError: parsed.directiveError && typeof parsed.directiveError === 'object' ? parsed.directiveError : null,
+    lastPromptContext: parsed.lastPromptContext ?? null
   };
 }
 
@@ -30,11 +86,17 @@ function readState(sessionId, override) {
   const file = statePath(sessionId, override);
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return {
-      ...freshState(),
-      ...parsed,
-      contract: { ...defaultContract(), ...(parsed.contract || {}) }
-    };
+    const normalized = normalizeState(parsed);
+    const hasDelegation = Object.prototype.hasOwnProperty.call(parsed, 'delegation');
+    const hasDirectiveError = Object.prototype.hasOwnProperty.call(parsed, 'directiveError');
+    const hasPromptContext = Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext');
+    const hasAgentIdsSeen = parsed.delegation
+      && typeof parsed.delegation === 'object'
+      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen');
+    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen) {
+      writeState(sessionId, normalized, override);
+    }
+    return normalized;
   } catch (error) {
     if (error && (error.code === 'ENOENT' || error.name === 'SyntaxError')) return freshState();
     throw error;

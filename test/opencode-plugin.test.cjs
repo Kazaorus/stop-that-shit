@@ -216,12 +216,12 @@ test('child sessions inherit the root contract without gaining authority from ch
     child: { id: 'child', parentID: 'root' }
   };
   const messages = {
-    'msg-root': message('root', 'msg-root', '$stop-that-shit review agents=1 -- inspect'),
+    'msg-root': message('root', 'msg-root', '$stop-that-shit review total-agents=1 -- inspect'),
     'msg-child': message('child', 'msg-child', 'Fix every issue you find.')
   };
   const { client, dataDir, hooks } = await plugin(t, sessions, messages);
 
-  await sendPartEvent(hooks, textPart('root', 'msg-root', '$stop-that-shit review agents=1 -- inspect'));
+  await sendPartEvent(hooks, textPart('root', 'msg-root', '$stop-that-shit review total-agents=1 -- inspect'));
   await hooks.event({ event: { type: 'session.created', properties: { info: sessions.child } } });
   await sendPartEvent(hooks, textPart('child', 'msg-child', 'Fix every issue you find.'));
 
@@ -244,11 +244,11 @@ test('parent and child task launches share one agent budget', async (t) => {
     child: { id: 'child', parentID: 'root' }
   };
   const messages = {
-    'msg-root': message('root', 'msg-root', '$stop-that-shit change agents=1 -- implement')
+    'msg-root': message('root', 'msg-root', '$stop-that-shit change total-agents=1 -- implement')
   };
   const { hooks } = await plugin(t, sessions, messages);
 
-  await sendPartEvent(hooks, textPart('root', 'msg-root', '$stop-that-shit change agents=1 -- implement'));
+  await sendPartEvent(hooks, textPart('root', 'msg-root', '$stop-that-shit change total-agents=1 -- implement'));
   await hooks['tool.execute.before'](
     { tool: 'task', sessionID: 'root', callID: 'task-1' },
     { args: { prompt: 'inspect', subagent_type: 'explore' } }
@@ -259,13 +259,83 @@ test('parent and child task launches share one agent budget', async (t) => {
       { tool: 'task', sessionID: 'child', callID: 'task-2' },
       { args: { prompt: 'inspect again', subagent_type: 'explore' } }
     ),
-    /AGENT_BUDGET_EXHAUSTED/
+    /TOTAL_AGENT_LIMIT/
   );
 
   await hooks['tool.execute.before'](
     { tool: 'task', sessionID: 'child', callID: 'task-continue' },
     { args: { task_id: 'child', prompt: 'continue', subagent_type: 'explore' } }
   );
+});
+
+test('OpenCode task completion releases the delegation reservation', async (t) => {
+  const sessions = { root: { id: 'root' } };
+  const messages = {
+    'msg-delegation': message('root', 'msg-delegation', '$stop-that-shit change concurrent-agents=1 -- delegate')
+  };
+  const { dataDir, hooks } = await plugin(t, sessions, messages);
+
+  await sendPartEvent(hooks, textPart('root', 'msg-delegation', '$stop-that-shit change concurrent-agents=1 -- delegate'));
+  await hooks['tool.execute.before'](
+    { tool: 'task', sessionID: 'root', callID: 'task-1' },
+    { args: { prompt: 'inspect', subagent_type: 'explore' } }
+  );
+  await hooks['tool.execute.after'](
+    { tool: 'task', sessionID: 'root', callID: 'task-1' },
+    { output: 'done' }
+  );
+
+  assert.deepEqual(readState('root', dataDir).delegation.reservations, {});
+  await assert.doesNotReject(
+    hooks['tool.execute.before'](
+      { tool: 'task', sessionID: 'root', callID: 'task-2' },
+      { args: { prompt: 'inspect again', subagent_type: 'explore' } }
+    )
+  );
+});
+
+test('child session deletion preserves root mapping until the child task completes', async (t) => {
+  const sessions = {
+    root: { id: 'root' },
+    child: { id: 'child', parentID: 'root' }
+  };
+  const messages = {
+    'msg-root': message('root', 'msg-root', '$stop-that-shit change concurrent-agents=1 -- delegate')
+  };
+  const { dataDir, hooks } = await plugin(t, sessions, messages);
+
+  await sendPartEvent(hooks, textPart('root', 'msg-root', '$stop-that-shit change concurrent-agents=1 -- delegate'));
+  await hooks.event({ event: { type: 'session.created', properties: { info: sessions.child } } });
+  await hooks['tool.execute.before'](
+    { tool: 'task', sessionID: 'child', callID: 'task-child' },
+    { args: { prompt: 'inspect', subagent_type: 'explore' } }
+  );
+  await hooks.event({ event: { type: 'session.deleted', properties: { info: sessions.child } } });
+  delete sessions.child;
+
+  await hooks['tool.execute.after'](
+    { tool: 'task', sessionID: 'child', callID: 'task-child' },
+    { output: 'done' }
+  );
+
+  assert.deepEqual(readState('root', dataDir).delegation.reservations, {});
+});
+
+test('root session deletion emits session.end and clears delegation state', async (t) => {
+  const sessions = { root: { id: 'root' } };
+  const messages = {
+    'msg-root-end': message('root', 'msg-root-end', '$stop-that-shit change concurrent-agents=1 -- delegate')
+  };
+  const { dataDir, hooks } = await plugin(t, sessions, messages);
+
+  await sendPartEvent(hooks, textPart('root', 'msg-root-end', '$stop-that-shit change concurrent-agents=1 -- delegate'));
+  await hooks['tool.execute.before'](
+    { tool: 'task', sessionID: 'root', callID: 'task-root' },
+    { args: { prompt: 'inspect', subagent_type: 'explore' } }
+  );
+  await hooks.event({ event: { type: 'session.deleted', properties: { info: sessions.root } } });
+
+  assert.deepEqual(readState('root', dataDir).delegation.reservations, {});
 });
 
 test('watch context is appended after the tool without denying execution', async (t) => {

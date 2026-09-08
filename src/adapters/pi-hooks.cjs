@@ -60,6 +60,18 @@ function toActionEvent(input, context = {}) {
   };
 }
 
+function toActionAfterEvent(input, context = {}) {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    kind: 'action.after',
+    sessionId: String(context.sessionId || ''),
+    host: hostMetadata(context),
+    action: {
+      id: String(input && input.toolCallId || '')
+    }
+  };
+}
+
 function controllerOptions(options) {
   return { ...options, denialResponseOutcome: 'execution_denial_returned' };
 }
@@ -70,6 +82,10 @@ function handlePiPrompt(input, context = {}, options = {}) {
 
 function handlePiTool(input, context = {}, options = {}) {
   return handleControlEvent(toActionEvent(input, context), controllerOptions(options));
+}
+
+function handlePiToolAfter(input, context = {}, options = {}) {
+  return handleControlEvent(toActionAfterEvent(input, context), controllerOptions(options));
 }
 
 function isPiControlInput(text, context = {}, options = {}) {
@@ -83,8 +99,10 @@ function isPiControlInput(text, context = {}, options = {}) {
 module.exports = {
   handlePiPrompt,
   handlePiTool,
+  handlePiToolAfter,
   isPiControlInput,
   normalizePiPrompt,
+  toActionAfterEvent,
   toActionEvent,
   toPromptEvent
 };

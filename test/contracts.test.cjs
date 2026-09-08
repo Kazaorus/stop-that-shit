@@ -50,11 +50,59 @@ test('an explicit empty files value creates an empty file boundary', () => {
   assert.equal(omitted.contract.allowedPaths, null);
 });
 
-test('lock level and agent budget are parsed from the directive head', () => {
-  const result = parseContractPrompt('$stop-that-shit lock change agents=2 -- implement it');
+test('agent limits default to the maximum safe integer', () => {
+  const contract = defaultContract();
+  assert.equal(contract.totalAgentBudget, Number.MAX_SAFE_INTEGER);
+  assert.equal(contract.concurrentAgentBudget, Number.MAX_SAFE_INTEGER);
+  assert.equal('agentBudget' in contract, false);
+  assert.equal('agentsUsed' in contract, false);
+});
+
+test('total and concurrent agent limits are parsed independently', () => {
+  const result = parseContractPrompt('$stop-that-shit lock change total-agents=3 concurrent-agents=2 -- implement it');
   assert.equal(result.contract.mode, 'change');
   assert.equal(result.contract.level, 'lock');
-  assert.equal(result.contract.agentBudget, 2);
+  assert.equal(result.contract.totalAgentBudget, 3);
+  assert.equal(result.contract.concurrentAgentBudget, 2);
+  assert.equal(result.error, null);
+});
+
+test('zero is accepted for both agent limits', () => {
+  const result = parseContractPrompt('$stop-that-shit change total-agents=0 concurrent-agents=0 -- implement it');
+  assert.equal(result.contract.totalAgentBudget, 0);
+  assert.equal(result.contract.concurrentAgentBudget, 0);
+});
+
+test('invalid agent limits return a structured error without changing the contract', () => {
+  const previous = {
+    ...defaultContract(),
+    mode: 'change',
+    level: 'guard',
+    totalAgentBudget: 4,
+    concurrentAgentBudget: 3
+  };
+  for (const token of ['total-agents=-1', 'total-agents=1.5', 'concurrent-agents=NaN', `concurrent-agents=${Number.MAX_SAFE_INTEGER + 1}`]) {
+    const result = parseContractPrompt(`$stop-that-shit change ${token} -- implement it`, previous);
+    assert.equal(result.error.code, 'INVALID_AGENT_LIMIT');
+    assert.equal(result.error.token, token);
+    assert.equal(result.changed, false);
+    assert.deepEqual(result.contract, previous);
+  }
+});
+
+test('legacy agents directive returns a migration error without partial updates', () => {
+  const previous = {
+    ...defaultContract(),
+    mode: 'review',
+    level: 'guard',
+    totalAgentBudget: 4,
+    concurrentAgentBudget: 3
+  };
+  const result = parseContractPrompt('$stop-that-shit change total-agents=9 agents=1 -- implement it', previous);
+  assert.equal(result.error.code, 'LEGACY_AGENT_DIRECTIVE');
+  assert.equal(result.error.token, 'agents=1');
+  assert.equal(result.changed, false);
+  assert.deepEqual(result.contract, previous);
 });
 
 test('implicit invocation stays watch-only until mode is confirmed', () => {
@@ -64,13 +112,13 @@ test('implicit invocation stays watch-only until mode is confirmed', () => {
 });
 
 test('explicit fix request updates a prior review contract', () => {
-  const prior = { mode: 'review', level: 'guard', agentBudget: 0, agentsUsed: 0 };
+  const prior = { ...defaultContract(), mode: 'review', level: 'guard' };
   const result = parseContractPrompt('Fix the P1 finding now. Do not change the others.', prior);
   assert.equal(result.contract.mode, 'change');
 });
 
 test('negative review language wins over the word fix', () => {
-  const prior = { mode: 'change', level: 'guard', agentBudget: 0, agentsUsed: 0 };
+  const prior = { ...defaultContract(), mode: 'change', level: 'guard' };
   const result = parseContractPrompt("Review only. Don't fix anything.", prior);
   assert.equal(result.contract.mode, 'review');
 });
