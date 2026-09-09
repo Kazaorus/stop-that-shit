@@ -14,8 +14,11 @@ An Adapter may reuse the decision module only if its host exposes:
 
 Lifecycle context injection is host-specific, but all five adapters map
 available lifecycle signals to the shared protocol. `action.before` reserves a
-delegation batch atomically; `action.after`, `subagent.stop`, and `session.end`
-release active units. Total usage is never refunded.
+delegation batch atomically. An `action.after` releases active units only when
+the host explicitly confirms synchronous completion; background or unknown-status
+work remains reserved until `subagent.stop` or `session.end`. Session end clears
+active units but total usage is never refunded. Adapters require explicit host
+identifiers and never pair reservations by event arrival order.
 
 The normalized event is versioned as `ControlEvent v1`:
 
@@ -59,7 +62,9 @@ UserPromptExpansion  -> prompt.submit (Stop That Shit Skill only; optional on ho
 The Claude adapter returns a `PreToolUse` `permissionDecision: "deny"` when the
 shared controller denies an action. `total-agents=N` and
 `concurrent-agents=M` are enforced before a Claude `Agent` tool runs; the
-started subagent binds by `agent_id`, and stop/after events release activity.
+started subagent binds by an explicit `reservation_id`, and `agent_id` is used
+for stop events. A `PostToolUse` event releases activity only when its payload
+confirms synchronous completion; otherwise the reservation remains active.
 
 The classifier covers Claude-native `Write`, `Edit`, `NotebookEdit`,
 `EnterWorktree`, `Bash`, `PowerShell`, `Monitor`, `Agent`, current read tools,
@@ -104,8 +109,11 @@ continues to apply independently.
 OpenCode creates a new session identifier for each `task` subagent. The plugin
 maps child sessions to the root session contract. A task
 `tool.execute.before` reserves its child count and `tool.execute.after` emits
-`action.after`; deleting the root session emits `session.end`, while deleting a
-child never clears the root reservation. The plugin does not parse child
+`action.after` with the tool's explicit action ID and async status; a terminal
+child session update or documented `session.idle`/idle `session.status` event
+emits `subagent.stop` when the child was explicitly associated. Deleting the
+root session emits `session.end`, while deleting a child never clears the root
+reservation. The plugin does not parse child
 prompts as new user authority and treats a `task_id` continuation as control
 rather than a new delegation. If ancestry cannot be resolved, it fails open
 without treating the uncertain child prompt as user authority.
@@ -135,7 +143,9 @@ top-level turn id) to `turnId`. A context result is rendered as
 non-applicable allow results produce no stdout and exit successfully.
 
 The adapter reserves the complete `delegate_task` child count at
-`pre_tool_call`; lifecycle events bind and release the shared reservation.
+`pre_tool_call`; lifecycle events bind and release the shared reservation. If
+Hermes does not identify a call as synchronous, the reservation is retained
+until an explicit `subagent_stop` or `on_session_end` event.
 
 ### Explicit Hermes tool coverage
 
@@ -160,8 +170,9 @@ core mode, hash, dependency, file-lock, or agent-budget decisions.
 
 A Hermes `delegate_task` call containing `tasks=[...]` is charged by the actual
 child count: one for a non-empty `goal`, or `tasks.length` for a batch. The
-complete batch is checked against both limits before execution; completion
-events release active slots without refunding the session total.
+complete batch is checked against both limits before execution; only confirmed
+synchronous completion releases active slots, without refunding the session
+total.
 
 ## Pi
 
@@ -173,6 +184,7 @@ input               -> prompt.submit
 before_agent_start  -> contract context message
 tool_call            -> action.before -> { block: true, reason } on denial
 tool_result          -> action.after plus watch-only context appended to the tool result
+session_shutdown     -> session.end
 ```
 
 The Adapter takes the stable session ID from Pi's session manager, preserves
@@ -191,9 +203,11 @@ The explicit Pi table covers `read`, `grep`, `find`, `ls`, `write`, `edit`,
 `unknown`. The optional official `subagent` example is recognized only through
 its documented single, `tasks`, and `chain` input shapes. The parent tool call
 reserves the complete count atomically. Pi retains the pending reservation by
-`toolCallId` until `tool_result` emits `action.after`; separate child Pi
-processes do not inherit the parent contract through a proven standard ancestry
-channel.
+`toolCallId` until `tool_result` emits `action.after`; an explicit background or
+unknown-status result remains active because the current Pi extension API does
+not expose a child-specific stop event, and `session_shutdown` is the cleanup
+boundary. Separate child Pi processes do not inherit the parent contract through
+a proven standard ancestry channel.
 Pi's user-initiated `!` and `!!` shell paths are outside the Agent `tool_call`
 surface.
 

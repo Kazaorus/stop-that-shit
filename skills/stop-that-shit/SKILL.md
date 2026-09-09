@@ -98,11 +98,16 @@ $stop-that-shit change total-agents=N concurrent-agents=M -- Run the task.
 
 `total-agents` counts every child successfully reserved in the session and is
 not refunded or reset when the contract changes. `concurrent-agents` counts
-active reservation units and is released by explicit completion, subagent-stop,
-or session-end events. Both limits apply together, default to
+active reservation units. Only an explicitly synchronous `action.after` releases
+its reservation; background or unknown-status calls remain active until an
+explicit subagent-stop or session-end event. Session end clears active units but
+never refunds the total. Both limits apply together, default to
 `Number.MAX_SAFE_INTEGER`, and accept `0` to forbid delegation. A batch that
-exceeds either limit is rejected atomically. The removed `agents=N` directive
-returns a migration error and does not partially update the contract.
+exceeds either limit is rejected atomically. The legacy `agents=N` directive is
+temporarily accepted as a deprecated alias for `total-agents=N` and emits a
+warning; conflicts or invalid values do not partially update the contract.
+Adapters bind lifecycle events only through explicit host identifiers and never
+pair reservations by arrival order.
 
 Claude Code equivalent:
 

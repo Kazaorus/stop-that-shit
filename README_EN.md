@@ -272,9 +272,15 @@ in the session; changing the limits in that session does not reset it.
 apply at the same time. When omitted, both default to
 `Number.MAX_SAFE_INTEGER`; `0` forbids delegation. If a batch exceeds either
 limit, the whole batch is rejected without queueing or partial execution.
-Explicit `action.after`, subagent-stop, or session-end events release active
-slots but never refund the cumulative total. The removed `agents=N` directive
-returns a migration error.
+Only an `action.after` that explicitly confirms synchronous completion releases
+its active slots. Background or unknown-status calls remain reserved until an
+explicit subagent-stop or session-end event. Session end clears active slots but
+never refunds the cumulative total; adapters never guess reservation ownership
+from event arrival order.
+
+The legacy `agents=N` directive remains temporarily compatible but is deprecated:
+it maps to `total-agents=N` and returns a warning. A conflict with
+`total-agents=M`, or any invalid value, leaves the contract unchanged.
 
 Skip `files=` when you do not know every affected file. Codex should inspect the
 real call path and update the callers, fixtures, or tests needed to finish the

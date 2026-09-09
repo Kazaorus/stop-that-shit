@@ -35,14 +35,14 @@ function prompt(session, text) {
   });
 }
 
-function pre(session, toolName, toolInput) {
+function pre(session, toolName, toolInput, toolCallId = `${toolName}-call`) {
   return hermesEnvelope({
     hook_event_name: 'pre_tool_call',
     tool_name: toolName,
     tool_input: toolInput,
     session_id: session,
-    tool_call_id: `${toolName}-call`,
-    extra: { user_message: '', tool_call_id: `${toolName}-call` }
+    tool_call_id: toolCallId,
+    extra: { user_message: '', tool_call_id: toolCallId }
   });
 }
 
@@ -53,7 +53,13 @@ function post(session, toolName, toolInput, toolCallId = `${toolName}-call`) {
     tool_input: toolInput,
     tool_call_id: toolCallId,
     session_id: session,
-    extra: { user_message: '', tool_call_id: toolCallId, result: 'done', status: 'success' }
+    extra: {
+      user_message: '',
+      tool_call_id: toolCallId,
+      result: 'done',
+      status: 'success',
+      async_launched: false
+    }
   });
 }
 
@@ -167,8 +173,10 @@ test('parallel Hermes hook processes cannot oversubscribe concurrent-agents=1', 
   const armed = runHook(home, JSON.stringify(prompt(session, '$stop-that-shit change total-agents=1 concurrent-agents=1 -- one delegation')));
   assert.equal(armed.status, 0, armed.stderr);
 
-  const payload = pre(session, 'delegate_task', { goal: 'inspect tests' });
-  const results = await Promise.all([runHookAsync(home, payload), runHookAsync(home, payload)]);
+  const results = await Promise.all([
+    runHookAsync(home, pre(session, 'delegate_task', { goal: 'inspect tests' }, 'delegate_task-call-a')),
+    runHookAsync(home, pre(session, 'delegate_task', { goal: 'inspect tests' }, 'delegate_task-call-b'))
+  ]);
   assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.stderr).join('\n'));
   const parsed = results.map((result) => result.stdout.trim() ? JSON.parse(result.stdout) : null);
   assert.equal(parsed.filter((value) => value === null).length, 1);
@@ -181,10 +189,11 @@ test('parallel Hermes batches reserve all child agents atomically', async (t) =>
   const armed = runHook(home, JSON.stringify(prompt(session, '$stop-that-shit change total-agents=2 concurrent-agents=2 -- one complete batch')));
   assert.equal(armed.status, 0, armed.stderr);
 
-  const payload = pre(session, 'delegate_task', {
-    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
-  });
-  const results = await Promise.all([runHookAsync(home, payload), runHookAsync(home, payload)]);
+  const taskInput = { tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }] };
+  const results = await Promise.all([
+    runHookAsync(home, pre(session, 'delegate_task', taskInput, 'delegate_task-call-a')),
+    runHookAsync(home, pre(session, 'delegate_task', taskInput, 'delegate_task-call-b'))
+  ]);
   assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.stderr).join('\n'));
   const parsed = results.map((result) => result.stdout.trim() ? JSON.parse(result.stdout) : null);
   assert.equal(parsed.filter((value) => value === null).length, 1);

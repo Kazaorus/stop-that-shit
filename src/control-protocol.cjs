@@ -48,12 +48,18 @@ function assertControlEvent(event) {
     ) {
       throw new TypeError('ControlEvent action.delegationCount must be a non-negative integer.');
     }
+    if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
+      throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
+    }
   }
   if (event.kind === 'action.after') {
     if (!event.action || typeof event.action !== 'object') {
       throw new TypeError(`ControlEvent ${event.kind} requires an action object.`);
     }
     nonEmptyString(event.action.id, 'action.id');
+    if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
+      throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
+    }
   }
   if (event.kind === 'subagent.start' || event.kind === 'subagent.stop') {
     for (const field of ['agentId', 'reservationId']) {

@@ -2,13 +2,20 @@
 
 ## Unreleased
 
-- **Agent limit split**：将已移除的 `agents=N` 拆分为
-  `total-agents=N` 与 `concurrent-agents=M`。session 总量累计计费，活动
-  reservation 按生命周期释放；两个限制同时检查，batch 超限整批拒绝，旧
-  指令返回迁移错误。/ Split the removed `agents=N` directive into
-  `total-agents=N` and `concurrent-agents=M`. Total usage is cumulative,
-  active reservations release on lifecycle completion, both limits apply
-  atomically, and legacy directives return a migration error.
+- **Agent limit split**：`total-agents=N` 与 `concurrent-agents=M` 分别控制
+  session 累计总量和活动 reservation；两个限制同时检查，batch 超限整批拒绝。
+  `agents=N` 暂时作为弃用 alias 映射到总量并给出 warning，旧 schema 的
+  `agentBudget=0` 也会保留。/ Split `total-agents=N` and
+  `concurrent-agents=M` into cumulative session usage and active reservations;
+  both limits apply atomically and oversized batches are rejected as a whole.
+  The legacy `agents=N` form remains temporarily accepted as a deprecated alias
+  for total usage, and schema migration preserves `agentBudget=0`.
+- **Lifecycle-safe concurrency**：同步完成的 `action.after` 才释放活动槽位；
+  后台或未知状态的 delegation 保留到明确的 stop/session-end 事件，适配器按
+  显式 host ID 关联，不使用 FIFO 猜测。/ Only confirmed synchronous
+  `action.after` events release active slots; background or unknown-status
+  delegations remain reserved until explicit stop/session-end events, and
+  adapters use explicit host IDs rather than FIFO guesses.
 
 ## 0.2.1 — 2026-09-03 (Scoped Guard false-allow fixes / 受限 Guard 误放行修复)
 

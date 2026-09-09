@@ -8,9 +8,11 @@ const {
   handleOpenCodeSessionEnd,
   handleOpenCodeTool,
   handleOpenCodeToolAfter,
-  promptText
+  promptText,
+  toSubagentStartEvent,
+  toSubagentStopEvent
 } = require('../src/adapters/opencode-hooks.cjs');
-const { contractContext } = require('../src/controller.cjs');
+const { contractContext, handleControlEvent } = require('../src/controller.cjs');
 const { parseContractPrompt } = require('../src/contracts.cjs');
 const { readState, writeState } = require('../src/state.cjs');
 
@@ -75,6 +77,24 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
     if (!info || !info.id) return false;
     const root = roots.get(info.id);
     return root === info.id || (!root && !info.parentID);
+  }
+
+  function isCompletedSession(info) {
+    const status = info && info.status;
+    const value = typeof status === 'string' ? status : status && (status.type || status.status);
+    return ['completed', 'complete', 'failed', 'error', 'cancelled', 'canceled', 'stopped'].includes(String(value || '').toLowerCase());
+  }
+
+  async function handleChildLifecycle(info, kind) {
+    const childID = info && (info.id || info.sessionID);
+    if (!childID) return;
+    const root = roots.get(childID) || (info.parentID && roots.get(info.parentID));
+    if (!root || root === childID) return;
+    const event = kind === 'start'
+      ? toSubagentStartEvent({ ...info, id: childID, sessionID: root }, { controlSessionID: root })
+      : toSubagentStopEvent({ ...info, id: childID, sessionID: root }, { controlSessionID: root });
+    if (!event || (kind === 'start' && !event.reservationId)) return;
+    handleControlEvent(event, { dataDir });
   }
 
   function forgetSession(info) {
@@ -262,6 +282,14 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
       const type = event && event.type;
       if (type === 'session.created' || type === 'session.updated') {
         rememberSession(properties.info);
+        if (type === 'session.created') await handleChildLifecycle(properties.info, 'start');
+        if (type === 'session.updated' && isCompletedSession(properties.info)) {
+          await handleChildLifecycle(properties.info, 'stop');
+        }
+      } else if (type === 'session.idle') {
+        await handleChildLifecycle({ sessionID: properties.sessionID }, 'stop');
+      } else if (type === 'session.status' && properties.status && properties.status.type === 'idle') {
+        await handleChildLifecycle({ sessionID: properties.sessionID }, 'stop');
       } else if (type === 'session.deleted') {
         if (isRootSession(properties.info)) {
           const sessionID = roots.get(properties.info && properties.info.id) || properties.info.id;

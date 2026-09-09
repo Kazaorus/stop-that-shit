@@ -16,6 +16,22 @@ function seenAgentIds(state) {
   return Array.isArray(state && state.agentIdsSeen) ? state.agentIdsSeen : [];
 }
 
+function stoppedAgentIds(state) {
+  return Array.isArray(state && state.stoppedAgentIds) ? state.stoppedAgentIds : [];
+}
+
+function acceptedActions(state) {
+  return state && state.acceptedActions && typeof state.acceptedActions === 'object'
+    ? state.acceptedActions
+    : {};
+}
+
+function acceptedActionCount(state, actionId) {
+  if (typeof actionId !== 'string' || !actionId) return null;
+  const count = acceptedActions(state)[actionId];
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
 function activeDelegationCount(state) {
   return Object.values(reservationsOf(state)).reduce((total, reservation) => {
     const pendingCount = Number.isSafeInteger(reservation && reservation.pendingCount) && reservation.pendingCount >= 0
@@ -33,13 +49,20 @@ function reserveDelegation(state, reservationId, actionId, count) {
   if (!Number.isSafeInteger(count) || count < 0) throw new TypeError('reservation count must be a non-negative safe integer.');
   const reservations = reservationsOf(state);
   if (reservations[reservationId]) return state;
+  const normalizedActionId = String(actionId || '');
+  const priorCount = acceptedActionCount(state, normalizedActionId);
+  if (priorCount !== null) return state;
+  const accepted = { ...acceptedActions(state) };
+  if (normalizedActionId) accepted[normalizedActionId] = count;
   return {
     ...state,
     totalAgentsUsed: totalAgentsUsed(state) + count,
+    acceptedActions: accepted,
     reservations: {
       ...reservations,
       [reservationId]: {
-        actionId: String(actionId || ''),
+        actionId: normalizedActionId,
+        asyncLaunched: null,
         pendingCount: count,
         agentIds: []
       }
@@ -47,14 +70,37 @@ function reserveDelegation(state, reservationId, actionId, count) {
   };
 }
 
+function markReservationAsync(state, reservationId, asyncLaunched) {
+  if (!reservationsOf(state)[reservationId] || typeof asyncLaunched !== 'boolean') return state;
+  const reservation = reservationsOf(state)[reservationId];
+  if (reservation.asyncLaunched === true || reservation.asyncLaunched === asyncLaunched) return state;
+  return {
+    ...state,
+    reservations: {
+      ...reservationsOf(state),
+      [reservationId]: { ...reservation, asyncLaunched }
+    }
+  };
+}
+
 function bindSubagent(state, agentId, reservationId) {
   if (typeof agentId !== 'string' || !agentId) return state;
-  if (seenAgentIds(state).includes(agentId)) return state;
   const reservations = reservationsOf(state);
+  const reservation = reservations[reservationId];
+  if (stoppedAgentIds(state).includes(agentId)) {
+    if (!reservation || !Number.isInteger(reservation.pendingCount) || reservation.pendingCount <= 0) return state;
+    const nextReservations = { ...reservations };
+    if (reservation.pendingCount === 1 && (!Array.isArray(reservation.agentIds) || reservation.agentIds.length === 0)) {
+      delete nextReservations[reservationId];
+    } else {
+      nextReservations[reservationId] = { ...reservation, pendingCount: reservation.pendingCount - 1 };
+    }
+    return { ...state, reservations: nextReservations };
+  }
+  if (seenAgentIds(state).includes(agentId)) return state;
   if (Object.values(reservations).some((reservation) => Array.isArray(reservation.agentIds) && reservation.agentIds.includes(agentId))) {
     return state;
   }
-  const reservation = reservations[reservationId];
   if (!reservation || !Number.isInteger(reservation.pendingCount) || reservation.pendingCount <= 0) return state;
   return {
     ...state,
@@ -72,6 +118,7 @@ function bindSubagent(state, agentId, reservationId) {
 
 function releaseSubagent(state, agentId) {
   if (typeof agentId !== 'string' || !agentId) return state;
+  const stopped = stoppedAgentIds(state);
   const reservations = reservationsOf(state);
   for (const [reservationId, reservation] of Object.entries(reservations)) {
     const agentIds = Array.isArray(reservation.agentIds) ? reservation.agentIds : [];
@@ -83,9 +130,14 @@ function releaseSubagent(state, agentId) {
     } else {
       nextReservations[reservationId] = { ...reservation, agentIds: remainingAgents };
     }
-    return { ...state, reservations: nextReservations };
+    return {
+      ...state,
+      stoppedAgentIds: [...new Set([...stopped, agentId])],
+      reservations: nextReservations
+    };
   }
-  return state;
+  if (stopped.includes(agentId)) return state;
+  return { ...state, stoppedAgentIds: [...stopped, agentId] };
 }
 
 function releaseReservation(state, reservationId) {
@@ -107,16 +159,12 @@ function reservationForAction(state, actionId) {
   return null;
 }
 
-function firstPendingReservation(state) {
-  return Object.entries(reservationsOf(state))
-    .find(([, reservation]) => reservation && reservation.pendingCount > 0)?.[0] || null;
-}
-
 module.exports = {
+  acceptedActionCount,
   activeDelegationCount,
   bindSubagent,
   clearDelegations,
-  firstPendingReservation,
+  markReservationAsync,
   releaseReservation,
   releaseSubagent,
   reserveDelegation,

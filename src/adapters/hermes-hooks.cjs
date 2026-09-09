@@ -9,6 +9,7 @@ const {
   detectHashIntent,
   extractAffectedPaths
 } = require('./hermes-tool-classifier.cjs');
+const { optionalIdentifier, readAsyncLaunched } = require('./lifecycle-fields.cjs');
 
 const EVENT_KIND = {
   pre_llm_call: 'prompt.submit',
@@ -44,11 +45,14 @@ function toControlEvent(input) {
   }
 
   if (kind === 'action.before') {
-    event.action = {
-      id: input.tool_call_id || extra.tool_call_id || null,
+    const mutability = classifyHermesTool(input.tool_name, input.tool_input);
+    const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
+    if (mutability === 'delegate' && !actionId) return null;
+    const action = {
+      id: actionId,
       name: String(input.tool_name || 'unknown'),
       input: input.tool_input,
-      mutability: classifyHermesTool(input.tool_name, input.tool_input),
+      mutability,
       delegationCount: countHermesDelegation(input.tool_name, input.tool_input),
       hashIntent: detectHashIntent(input.tool_name, input.tool_input),
       dependencyIntent: detectDependencyIntent(input.tool_name, input.tool_input),
@@ -56,12 +60,19 @@ function toControlEvent(input) {
       cwd: input.cwd,
       unboundedDelegation: false
     };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
+    if (mutability === 'delegate' && asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
+    event.action = {
+      ...action
+    };
   }
 
   if (kind === 'action.after') {
-    const actionId = input.tool_call_id || extra.tool_call_id || null;
+    const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
     if (!actionId) return null;
     event.action = { id: String(actionId) };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
+    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
   }
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
@@ -70,9 +81,10 @@ function toControlEvent(input) {
       || extra.child_subagent_id
       || input.child_subagent_id
       || null;
-    if (agentId) event.agentId = String(agentId);
-    const reservationId = extra.reservation_id || extra.reservationId || null;
-    if (reservationId) event.reservationId = String(reservationId);
+    const normalizedAgentId = optionalIdentifier(agentId);
+    if (normalizedAgentId) event.agentId = normalizedAgentId;
+    const reservationId = optionalIdentifier(extra.reservation_id, extra.reservationId);
+    if (reservationId) event.reservationId = reservationId;
   }
 
   return event;

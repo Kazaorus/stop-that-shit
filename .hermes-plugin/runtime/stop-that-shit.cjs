@@ -15,6 +15,7 @@ const {
   detectHashIntent,
   extractAffectedPaths
 } = __require("src/adapters/hermes-tool-classifier.cjs");
+const { optionalIdentifier, readAsyncLaunched } = __require("src/adapters/lifecycle-fields.cjs");
 
 const EVENT_KIND = {
   pre_llm_call: 'prompt.submit',
@@ -50,11 +51,14 @@ function toControlEvent(input) {
   }
 
   if (kind === 'action.before') {
-    event.action = {
-      id: input.tool_call_id || extra.tool_call_id || null,
+    const mutability = classifyHermesTool(input.tool_name, input.tool_input);
+    const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
+    if (mutability === 'delegate' && !actionId) return null;
+    const action = {
+      id: actionId,
       name: String(input.tool_name || 'unknown'),
       input: input.tool_input,
-      mutability: classifyHermesTool(input.tool_name, input.tool_input),
+      mutability,
       delegationCount: countHermesDelegation(input.tool_name, input.tool_input),
       hashIntent: detectHashIntent(input.tool_name, input.tool_input),
       dependencyIntent: detectDependencyIntent(input.tool_name, input.tool_input),
@@ -62,12 +66,19 @@ function toControlEvent(input) {
       cwd: input.cwd,
       unboundedDelegation: false
     };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
+    if (mutability === 'delegate' && asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
+    event.action = {
+      ...action
+    };
   }
 
   if (kind === 'action.after') {
-    const actionId = input.tool_call_id || extra.tool_call_id || null;
+    const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
     if (!actionId) return null;
     event.action = { id: String(actionId) };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
+    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
   }
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
@@ -76,9 +87,10 @@ function toControlEvent(input) {
       || extra.child_subagent_id
       || input.child_subagent_id
       || null;
-    if (agentId) event.agentId = String(agentId);
-    const reservationId = extra.reservation_id || extra.reservationId || null;
-    if (reservationId) event.reservationId = String(reservationId);
+    const normalizedAgentId = optionalIdentifier(agentId);
+    if (normalizedAgentId) event.agentId = normalizedAgentId;
+    const reservationId = optionalIdentifier(extra.reservation_id, extra.reservationId);
+    if (reservationId) event.reservationId = reservationId;
   }
 
   return event;
@@ -158,12 +170,18 @@ function assertControlEvent(event) {
     ) {
       throw new TypeError('ControlEvent action.delegationCount must be a non-negative integer.');
     }
+    if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
+      throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
+    }
   }
   if (event.kind === 'action.after') {
     if (!event.action || typeof event.action !== 'object') {
       throw new TypeError(`ControlEvent ${event.kind} requires an action object.`);
     }
     nonEmptyString(event.action.id, 'action.id');
+    if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
+      throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
+    }
   }
   if (event.kind === 'subagent.start' || event.kind === 'subagent.stop') {
     for (const field of ['agentId', 'reservationId']) {
@@ -185,14 +203,14 @@ module.exports = {
 "src/controller.cjs": function(module, exports, __require) {
 'use strict';
 
-const crypto = require('node:crypto');
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = __require("src/contracts.cjs");
 const { assertControlEvent } = __require("src/control-protocol.cjs");
 const {
+  acceptedActionCount,
   activeDelegationCount,
   bindSubagent,
   clearDelegations,
-  firstPendingReservation,
+  markReservationAsync,
   releaseReservation,
   releaseSubagent,
   reserveDelegation,
@@ -211,20 +229,24 @@ function context(text) {
   return { kind: 'context', text };
 }
 
-function contractContext(contract, delegation = {}, phase = 'active') {
+function contractContext(contract, delegation = {}, phase = 'active', directiveWarning = null) {
   if (typeof delegation === 'string') {
     phase = delegation;
     delegation = {};
   }
   if (contract.level === 'off') {
-    return 'Stop That Shit is disabled for this session. No plugin decision is being enforced.';
+    return [
+      directiveWarning && directiveWarning.message ? `Warning: ${directiveWarning.message}` : null,
+      'Stop That Shit is disabled for this session. No plugin decision is being enforced.'
+    ].filter(Boolean).join(' ');
   }
   if (contract.mode === 'unconfirmed') {
     return [
+      directiveWarning && directiveWarning.message ? `Warning: ${directiveWarning.message}` : null,
       'Stop That Shit is in watch-only mode because no task mode is confirmed.',
       'Use $stop-that-shit review for read-only work, or change for implementation. The default fast path relies on the Stop Ladder and does not claim a full machine contract.',
       'Do not claim that mutations are being blocked until a mode is confirmed.'
-    ].join(' ');
+    ].filter(Boolean).join(' ');
   }
 
   const totalLimit = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
@@ -238,12 +260,13 @@ function contractContext(contract, delegation = {}, phase = 'active') {
     : 0;
 
   return [
+    directiveWarning && directiveWarning.message ? `Warning: ${directiveWarning.message}` : null,
     `Stop That Shit (${phase}): mode=${contract.mode}; total=${totalUsed}/${totalLimit}; concurrent=${activeDelegationCount(delegation)}/${concurrentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
     'Stop Ladder: Is it requested? Is it necessary? What reachable evidence proves that? Would omission fail the current acceptance?',
     'Report real findings even when implementation is not authorized.',
     'Before expanding scope, name reachable evidence, failure if omitted, and the fact that changes the next action.',
     'Harness interception coverage is a guardrail, not a security boundary.'
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 }
 
 const FAMILY_NAMES = { I: 'INTENT', H: 'HASH', S: 'SCOPE', T: 'THRASH' };
@@ -336,13 +359,15 @@ function handlePrompt(event, options) {
   const parsed = parseContractPrompt(event.prompt, state.contract);
   if (parsed.error) {
     state.directiveError = parsed.error;
+    state.directiveWarning = null;
     state.lastPromptContext = null;
     writeState(event.sessionId, state, options.dataDir);
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
   }
   state.contract = parsed.contract;
   if (parsed.directive || parsed.correction) state.directiveError = null;
-  const promptContext = contractContext(state.contract, state.delegation);
+  if (parsed.directive || parsed.correction) state.directiveWarning = parsed.warning;
+  const promptContext = contractContext(state.contract, state.delegation, 'active', state.directiveWarning);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
   writeState(event.sessionId, state, options.dataDir);
@@ -364,17 +389,35 @@ function handleBeforeAction(event, options) {
       affectedPaths: event.action.affectedPaths,
       cwd: event.action.cwd,
       dependencyIntent: Boolean(event.action.dependencyIntent),
-      unboundedDelegation: Boolean(event.action.unboundedDelegation)
+      unboundedDelegation: Boolean(event.action.unboundedDelegation),
+      asyncLaunched: event.action.mutability === 'delegate' && typeof event.action.asyncLaunched === 'boolean'
+        ? event.action.asyncLaunched
+        : null
     };
+    const existingReservation = event.action.mutability === 'delegate'
+      ? reservationForAction(state.delegation, event.action.id)
+      : null;
+    const acceptedCount = event.action.mutability === 'delegate'
+      ? acceptedActionCount(state.delegation, event.action.id)
+      : null;
+    action.duplicateActionConflict = acceptedCount !== null && acceptedCount !== delegationCount;
+    action.alreadyReserved = !action.duplicateActionConflict
+      && (Boolean(existingReservation) || acceptedCount === delegationCount);
     const result = decide({ contract: state.contract, action, state });
 
     if (event.action.mutability === 'delegate' && result.outcome === 'allow') {
       const actionId = event.action.id;
-      const existingReservation = reservationForAction(state.delegation, actionId);
       if (!existingReservation) {
-        const reservationId = actionId ? `reservation:${actionId}` : `reservation:${crypto.randomUUID()}`;
+        const reservationId = `reservation:${actionId}`;
         state.delegation = reserveDelegation(state.delegation, reservationId, actionId, delegationCount);
+        state.delegation = markReservationAsync(state.delegation, reservationId, action.asyncLaunched);
         writeState(event.sessionId, state, options.dataDir);
+      } else if (typeof action.asyncLaunched === 'boolean') {
+        const nextDelegation = markReservationAsync(state.delegation, existingReservation, action.asyncLaunched);
+        if (nextDelegation !== state.delegation) {
+          state.delegation = nextDelegation;
+          writeState(event.sessionId, state, options.dataDir);
+        }
       }
     }
     return { state, result };
@@ -414,8 +457,18 @@ function handleAfterAction(event, options) {
     const state = readState(event.sessionId, options.dataDir);
     const reservationId = reservationForAction(state.delegation, event.action.id);
     if (reservationId) {
-      state.delegation = releaseReservation(state.delegation, reservationId);
-      writeState(event.sessionId, state, options.dataDir);
+      let nextDelegation = state.delegation;
+      if (typeof event.action.asyncLaunched === 'boolean') {
+        nextDelegation = markReservationAsync(nextDelegation, reservationId, event.action.asyncLaunched);
+      }
+      const reservation = nextDelegation.reservations[reservationId];
+      if (reservation && reservation.asyncLaunched === false) {
+        nextDelegation = releaseReservation(nextDelegation, reservationId);
+      }
+      if (nextDelegation !== state.delegation) {
+        state.delegation = nextDelegation;
+        writeState(event.sessionId, state, options.dataDir);
+      }
     }
     return none();
   });
@@ -426,11 +479,7 @@ function handleLifecycleContext(event, options) {
     const state = readState(event.sessionId, options.dataDir);
     let nextDelegation = state.delegation;
     if (event.kind === 'subagent.start' && event.agentId) {
-      nextDelegation = bindSubagent(
-        state.delegation,
-        event.agentId,
-        event.reservationId || firstPendingReservation(state.delegation)
-      );
+      nextDelegation = bindSubagent(state.delegation, event.agentId, event.reservationId);
     } else if (event.kind === 'subagent.stop' && event.agentId) {
       nextDelegation = releaseSubagent(state.delegation, event.agentId);
     } else if (event.kind === 'session.end') {
@@ -440,7 +489,7 @@ function handleLifecycleContext(event, options) {
       state.delegation = nextDelegation;
       writeState(event.sessionId, state, options.dataDir);
     }
-    return context(contractContext(state.contract, nextDelegation));
+    return context(contractContext(state.contract, nextDelegation, 'active', state.directiveWarning));
   };
   return ['subagent.start', 'subagent.stop', 'session.end'].includes(event.kind)
     ? withSessionLock(event.sessionId, options.dataDir, update)
@@ -495,7 +544,7 @@ function directiveHead(prompt, matchEnd) {
   const tail = prompt.slice(matchEnd).trimStart();
   const boundaries = [tail.indexOf('--'), tail.search(/:(?=\s|$)/), tail.indexOf('\n')]
     .filter((index) => index >= 0);
-  const end = boundaries.length ? Math.min(...boundaries) : Math.min(tail.length, 80);
+  const end = boundaries.length ? Math.min(...boundaries) : tail.length;
   return tail.slice(0, end).trim();
 }
 
@@ -505,17 +554,36 @@ function parseDirective(prompt) {
 
   const head = directiveHead(prompt, mention.index + mention[0].length);
   const tokens = head.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean);
-  const parsed = { mentioned: true, error: null };
+  const parsed = { mentioned: true, error: null, warning: null };
+  let legacyAgentLimit = null;
+  let legacyAgentToken = null;
+  let canonicalAgentLimit = null;
 
   for (const rawToken of tokens) {
     const token = rawToken.toLowerCase();
     if (MODES.has(token)) parsed.mode = token;
     if (LEVELS.has(token)) parsed.level = token;
-    if (/^agents(?:=|$)/i.test(rawToken)) {
+    const legacyAgents = /^agents=(.*)$/i.exec(rawToken);
+    if (legacyAgents) {
+      const value = parseAgentLimit(legacyAgents[1]);
+      if (value === null) {
+        parsed.error = invalidAgentLimit(rawToken);
+        break;
+      }
+      legacyAgentLimit = value;
+      legacyAgentToken = rawToken;
+      parsed.warning = {
+        code: 'DEPRECATED_AGENT_DIRECTIVE',
+        token: rawToken,
+        message: 'The agents=N directive is deprecated; use total-agents=N.'
+      };
+      continue;
+    }
+    if (/^agents$/i.test(rawToken)) {
       parsed.error = {
         code: 'LEGACY_AGENT_DIRECTIVE',
         token: rawToken,
-        message: 'The agents=N directive was removed; use total-agents=N and/or concurrent-agents=N.'
+        message: 'The agents directive requires a numeric value; use total-agents=N.'
       };
       break;
     }
@@ -526,6 +594,7 @@ function parseDirective(prompt) {
         parsed.error = invalidAgentLimit(rawToken);
         break;
       }
+      canonicalAgentLimit = value;
       parsed.totalAgentBudget = value;
     }
     const concurrentAgents = /^concurrent-agents=(.*)$/i.exec(rawToken);
@@ -543,6 +612,17 @@ function parseDirective(prompt) {
     if (files) parsed.allowedPaths = files[1].split('|').map((value) => value.replace(/\\/g, '/')).filter(Boolean);
     const dependencies = /^deps=(deny|ask|allow)$/.exec(token);
     if (dependencies && SCOPE_POLICIES.has(dependencies[1])) parsed.dependencyPolicy = dependencies[1];
+  }
+
+  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit !== null && legacyAgentLimit !== canonicalAgentLimit) {
+    parsed.error = {
+      code: 'CONFLICTING_AGENT_LIMITS',
+      token: legacyAgentToken,
+      message: `${legacyAgentToken} conflicts with total-agents=${canonicalAgentLimit}.`
+    };
+  }
+  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit === null) {
+    parsed.totalAgentBudget = legacyAgentLimit;
   }
 
   return parsed;
@@ -588,7 +668,15 @@ function naturalCorrection(prompt, previous) {
 }
 
 function parseContractPrompt(prompt, previousContract = defaultContract()) {
-  const previous = { ...defaultContract(), ...previousContract };
+  const supplied = previousContract && typeof previousContract === 'object' ? previousContract : {};
+  const previous = { ...defaultContract(), ...supplied };
+  if (
+    !Object.prototype.hasOwnProperty.call(supplied, 'totalAgentBudget')
+    && Number.isSafeInteger(supplied.agentBudget)
+    && supplied.agentBudget >= 0
+  ) {
+    previous.totalAgentBudget = supplied.agentBudget;
+  }
   delete previous.agentBudget;
   delete previous.agentsUsed;
   const directive = parseDirective(String(prompt || ''));
@@ -603,6 +691,7 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
         changed: false,
         directive: true,
         correction: Boolean(correction),
+        warning: null,
         error: directive.error
       };
     }
@@ -658,7 +747,14 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
     next.level = 'watch';
   }
 
-  return { contract: next, changed, directive: Boolean(directive), correction: Boolean(correction), error: null };
+  return {
+    contract: next,
+    changed,
+    directive: Boolean(directive),
+    correction: Boolean(correction),
+    warning: directive && directive.warning ? directive.warning : null,
+    error: null
+  };
 }
 
 module.exports = {
@@ -691,6 +787,22 @@ function seenAgentIds(state) {
   return Array.isArray(state && state.agentIdsSeen) ? state.agentIdsSeen : [];
 }
 
+function stoppedAgentIds(state) {
+  return Array.isArray(state && state.stoppedAgentIds) ? state.stoppedAgentIds : [];
+}
+
+function acceptedActions(state) {
+  return state && state.acceptedActions && typeof state.acceptedActions === 'object'
+    ? state.acceptedActions
+    : {};
+}
+
+function acceptedActionCount(state, actionId) {
+  if (typeof actionId !== 'string' || !actionId) return null;
+  const count = acceptedActions(state)[actionId];
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
 function activeDelegationCount(state) {
   return Object.values(reservationsOf(state)).reduce((total, reservation) => {
     const pendingCount = Number.isSafeInteger(reservation && reservation.pendingCount) && reservation.pendingCount >= 0
@@ -708,13 +820,20 @@ function reserveDelegation(state, reservationId, actionId, count) {
   if (!Number.isSafeInteger(count) || count < 0) throw new TypeError('reservation count must be a non-negative safe integer.');
   const reservations = reservationsOf(state);
   if (reservations[reservationId]) return state;
+  const normalizedActionId = String(actionId || '');
+  const priorCount = acceptedActionCount(state, normalizedActionId);
+  if (priorCount !== null) return state;
+  const accepted = { ...acceptedActions(state) };
+  if (normalizedActionId) accepted[normalizedActionId] = count;
   return {
     ...state,
     totalAgentsUsed: totalAgentsUsed(state) + count,
+    acceptedActions: accepted,
     reservations: {
       ...reservations,
       [reservationId]: {
-        actionId: String(actionId || ''),
+        actionId: normalizedActionId,
+        asyncLaunched: null,
         pendingCount: count,
         agentIds: []
       }
@@ -722,14 +841,37 @@ function reserveDelegation(state, reservationId, actionId, count) {
   };
 }
 
+function markReservationAsync(state, reservationId, asyncLaunched) {
+  if (!reservationsOf(state)[reservationId] || typeof asyncLaunched !== 'boolean') return state;
+  const reservation = reservationsOf(state)[reservationId];
+  if (reservation.asyncLaunched === true || reservation.asyncLaunched === asyncLaunched) return state;
+  return {
+    ...state,
+    reservations: {
+      ...reservationsOf(state),
+      [reservationId]: { ...reservation, asyncLaunched }
+    }
+  };
+}
+
 function bindSubagent(state, agentId, reservationId) {
   if (typeof agentId !== 'string' || !agentId) return state;
-  if (seenAgentIds(state).includes(agentId)) return state;
   const reservations = reservationsOf(state);
+  const reservation = reservations[reservationId];
+  if (stoppedAgentIds(state).includes(agentId)) {
+    if (!reservation || !Number.isInteger(reservation.pendingCount) || reservation.pendingCount <= 0) return state;
+    const nextReservations = { ...reservations };
+    if (reservation.pendingCount === 1 && (!Array.isArray(reservation.agentIds) || reservation.agentIds.length === 0)) {
+      delete nextReservations[reservationId];
+    } else {
+      nextReservations[reservationId] = { ...reservation, pendingCount: reservation.pendingCount - 1 };
+    }
+    return { ...state, reservations: nextReservations };
+  }
+  if (seenAgentIds(state).includes(agentId)) return state;
   if (Object.values(reservations).some((reservation) => Array.isArray(reservation.agentIds) && reservation.agentIds.includes(agentId))) {
     return state;
   }
-  const reservation = reservations[reservationId];
   if (!reservation || !Number.isInteger(reservation.pendingCount) || reservation.pendingCount <= 0) return state;
   return {
     ...state,
@@ -747,6 +889,7 @@ function bindSubagent(state, agentId, reservationId) {
 
 function releaseSubagent(state, agentId) {
   if (typeof agentId !== 'string' || !agentId) return state;
+  const stopped = stoppedAgentIds(state);
   const reservations = reservationsOf(state);
   for (const [reservationId, reservation] of Object.entries(reservations)) {
     const agentIds = Array.isArray(reservation.agentIds) ? reservation.agentIds : [];
@@ -758,9 +901,14 @@ function releaseSubagent(state, agentId) {
     } else {
       nextReservations[reservationId] = { ...reservation, agentIds: remainingAgents };
     }
-    return { ...state, reservations: nextReservations };
+    return {
+      ...state,
+      stoppedAgentIds: [...new Set([...stopped, agentId])],
+      reservations: nextReservations
+    };
   }
-  return state;
+  if (stopped.includes(agentId)) return state;
+  return { ...state, stoppedAgentIds: [...stopped, agentId] };
 }
 
 function releaseReservation(state, reservationId) {
@@ -782,16 +930,12 @@ function reservationForAction(state, actionId) {
   return null;
 }
 
-function firstPendingReservation(state) {
-  return Object.entries(reservationsOf(state))
-    .find(([, reservation]) => reservation && reservation.pendingCount > 0)?.[0] || null;
-}
-
 module.exports = {
+  acceptedActionCount,
   activeDelegationCount,
   bindSubagent,
   clearDelegations,
-  firstPendingReservation,
+  markReservationAsync,
   releaseReservation,
   releaseSubagent,
   reserveDelegation,
@@ -953,6 +1097,16 @@ function decide({ contract, action, state = {} }) {
     );
   }
 
+  if (action.mutability === 'delegate' && action.duplicateActionConflict) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'DUPLICATE_ACTION_ID',
+      'The host reused an action identifier with a different delegation count, so the request cannot be charged safely.',
+      'Use a unique action identifier for each delegation call.'
+    );
+  }
+
   const totalAgentBudget = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
     ? contract.totalAgentBudget
     : DEFAULT_AGENT_LIMIT;
@@ -963,7 +1117,7 @@ function decide({ contract, action, state = {} }) {
     ? state.delegation.totalAgentsUsed
     : 0;
   const activeAgents = activeDelegationCount(state.delegation);
-  if (action.mutability === 'delegate' && totalAgentsUsed + delegationCount > totalAgentBudget) {
+  if (action.mutability === 'delegate' && !action.alreadyReserved && totalAgentsUsed + delegationCount > totalAgentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
@@ -972,7 +1126,7 @@ function decide({ contract, action, state = {} }) {
       'Continue locally or increase total-agents=N in a corrected directive.'
     );
   }
-  if (action.mutability === 'delegate' && activeAgents + delegationCount > concurrentAgentBudget) {
+  if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > concurrentAgentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
@@ -1323,8 +1477,11 @@ function freshState() {
     delegation: {
       totalAgentsUsed: 0,
       reservations: {},
-      agentIdsSeen: []
+      agentIdsSeen: [],
+      stoppedAgentIds: [],
+      acceptedActions: {}
     },
+    directiveWarning: null,
     directiveError: null,
     lastPromptContext: null
   };
@@ -1342,6 +1499,7 @@ function normalizeDelegation(value, legacyUsed) {
       if (!reservation || typeof reservation !== 'object') continue;
       reservations[reservationId] = {
         actionId: typeof reservation.actionId === 'string' ? reservation.actionId : '',
+        asyncLaunched: typeof reservation.asyncLaunched === 'boolean' ? reservation.asyncLaunched : null,
         pendingCount: safeCount(reservation.pendingCount),
         agentIds: Array.isArray(reservation.agentIds)
           ? [...new Set(reservation.agentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
@@ -1349,13 +1507,26 @@ function normalizeDelegation(value, legacyUsed) {
       };
     }
   }
+  const acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
+    ? Object.fromEntries(Object.entries(source.acceptedActions)
+      .filter(([actionId, count]) => typeof actionId === 'string' && actionId
+        && Number.isSafeInteger(count) && count >= 0))
+    : {};
+  for (const reservation of Object.values(reservations)) {
+    if (!reservation.actionId || Object.prototype.hasOwnProperty.call(acceptedActions, reservation.actionId)) continue;
+    acceptedActions[reservation.actionId] = reservation.pendingCount + reservation.agentIds.length;
+  }
   const hasNewTotal = Number.isSafeInteger(source.totalAgentsUsed) && source.totalAgentsUsed >= 0;
   return {
     totalAgentsUsed: hasNewTotal ? source.totalAgentsUsed : safeCount(legacyUsed),
     reservations,
     agentIdsSeen: Array.isArray(source.agentIdsSeen)
       ? [...new Set(source.agentIdsSeen.filter((agentId) => typeof agentId === 'string' && agentId))]
-      : []
+      : [],
+    stoppedAgentIds: Array.isArray(source.stoppedAgentIds)
+      ? [...new Set(source.stoppedAgentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
+      : [],
+    acceptedActions
   };
 }
 
@@ -1363,6 +1534,12 @@ function normalizeState(parsed) {
   const fresh = freshState();
   const legacyContract = parsed.contract && typeof parsed.contract === 'object' ? parsed.contract : {};
   const contract = { ...fresh.contract, ...legacyContract };
+  const legacyBudget = Number.isSafeInteger(legacyContract.agentBudget) && legacyContract.agentBudget >= 0
+    ? legacyContract.agentBudget
+    : null;
+  if (!Object.prototype.hasOwnProperty.call(legacyContract, 'totalAgentBudget') && legacyBudget !== null) {
+    contract.totalAgentBudget = legacyBudget;
+  }
   delete contract.agentBudget;
   delete contract.agentsUsed;
   if (!Number.isSafeInteger(contract.totalAgentBudget) || contract.totalAgentBudget < 0) {
@@ -1375,6 +1552,7 @@ function normalizeState(parsed) {
     schemaVersion: 2,
     contract,
     delegation: normalizeDelegation(parsed.delegation, legacyContract.agentsUsed),
+    directiveWarning: parsed.directiveWarning && typeof parsed.directiveWarning === 'object' ? parsed.directiveWarning : null,
     directiveError: parsed.directiveError && typeof parsed.directiveError === 'object' ? parsed.directiveError : null,
     lastPromptContext: parsed.lastPromptContext ?? null
   };
@@ -1386,12 +1564,19 @@ function readState(sessionId, override) {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     const normalized = normalizeState(parsed);
     const hasDelegation = Object.prototype.hasOwnProperty.call(parsed, 'delegation');
+    const hasDirectiveWarning = Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning');
     const hasDirectiveError = Object.prototype.hasOwnProperty.call(parsed, 'directiveError');
     const hasPromptContext = Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext');
     const hasAgentIdsSeen = parsed.delegation
       && typeof parsed.delegation === 'object'
       && Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen');
-    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen) {
+    const hasStoppedAgentIds = parsed.delegation
+      && typeof parsed.delegation === 'object'
+      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds');
+    const hasAcceptedActions = parsed.delegation
+      && typeof parsed.delegation === 'object'
+      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions');
+    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveWarning || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen || !hasStoppedAgentIds || !hasAcceptedActions) {
       writeState(sessionId, normalized, override);
     }
     return normalized;
@@ -1815,6 +2000,34 @@ function classifyCodexTool(toolName, toolInput) {
 }
 
 module.exports = { classifyCodexTool, classifyShell, detectDependencyIntent, detectHashIntent, extractAffectedPaths };
+
+},
+"src/adapters/lifecycle-fields.cjs": function(module, exports, __require) {
+'use strict';
+
+const ASYNC_FIELDS = [
+  'async_launched',
+  'asyncLaunched',
+  'run_in_background',
+  'runInBackground',
+  'background'
+];
+
+function readAsyncLaunched(...sources) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const field of ASYNC_FIELDS) {
+      if (typeof source[field] === 'boolean') return source[field];
+    }
+  }
+  return null;
+}
+
+function optionalIdentifier(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim()) || null;
+}
+
+module.exports = { optionalIdentifier, readAsyncLaunched };
 
 }
 };

@@ -33,12 +33,12 @@ function expansion(session, args, commandName = 'stop-that-shit:stop-that-shit')
   };
 }
 
-function pre(session, toolName, toolInput, cwd = root) {
+function pre(session, toolName, toolInput, cwd = root, toolUseId = `${toolName}-1`) {
   return {
     session_id: session,
     hook_event_name: 'PreToolUse',
     tool_name: toolName,
-    tool_use_id: `${toolName}-1`,
+    tool_use_id: toolUseId,
     tool_input: toolInput,
     cwd,
     permission_mode: 'default'
@@ -98,16 +98,14 @@ test('Claude Adapter maps lifecycle Hook fields to ControlEvent v1', () => {
   }
 });
 
-test('Claude prompt hooks block legacy directives instead of dropping the error', (t) => {
+test('Claude prompt hooks keep legacy directives compatible with a deprecation warning', (t) => {
   const options = workspace(t);
   handleClaudeHook(prompt('invalid-directive', '$stop-that-shit change total-agents=4 -- bounded delegation'), options);
   const output = handleClaudeHook(prompt('invalid-directive', '$stop-that-shit change agents=1 -- legacy syntax'), options);
-  assert.equal(output.decision, 'block');
-  assert.match(output.reason, /agents=N directive was removed/);
+  assert.match(output.hookSpecificOutput.additionalContext, /deprecated/);
 
   const expansionOutput = handleClaudeHook(expansion('invalid-expansion', 'agents=1'), options);
-  assert.equal(expansionOutput.decision, 'block');
-  assert.match(expansionOutput.reason, /agents=N directive was removed/);
+  assert.match(expansionOutput.hookSpecificOutput.additionalContext, /deprecated/);
 
   assert.deepEqual(fromControlResult('UserPromptExpansion', {
     kind: 'prompt-error',
@@ -118,12 +116,13 @@ test('Claude prompt hooks block legacy directives instead of dropping the error'
 test('Claude lifecycle hooks update and clear delegation state', (t) => {
   const options = workspace(t);
   handleClaudeHook(prompt('lifecycle', '$stop-that-shit change total-agents=4 concurrent-agents=4 -- delegate'), options);
-  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect' }), options);
+  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect', async_launched: false }), options);
 
   handleClaudeHook({
     session_id: 'lifecycle',
     hook_event_name: 'SubagentStart',
     agent_id: 'agent-1',
+    reservation_id: 'reservation:Agent-1',
     cwd: root
   }, options);
   assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations['reservation:Agent-1'].agentIds, ['agent-1']);
@@ -137,7 +136,7 @@ test('Claude lifecycle hooks update and clear delegation state', (t) => {
   assert.equal(stopped, null);
   assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations, {});
 
-  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect again' }), options);
+  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect again', async_launched: false }), options);
   const completed = handleClaudeHook({
     session_id: 'lifecycle',
     hook_event_name: 'PostToolUse',
@@ -149,7 +148,7 @@ test('Claude lifecycle hooks update and clear delegation state', (t) => {
   assert.equal(completed, null);
   assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations, {});
 
-  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect final' }), options);
+  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect final', async_launched: false }), options);
   const ended = handleClaudeHook({
     session_id: 'lifecycle',
     hook_event_name: 'SessionEnd',
@@ -296,8 +295,8 @@ test('Monitor command sources reuse shell hash/dependency enforcement while WebS
 test('Claude Agent uses the shared total and concurrent limits', (t) => {
   const options = workspace(t);
   handleClaudeHook(prompt('agent-budget', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- use one specialist'), options);
-  assert.equal(handleClaudeHook(pre('agent-budget', 'Agent', { prompt: 'inspect tests' }), options), null);
-  const denied = handleClaudeHook(pre('agent-budget', 'Agent', { prompt: 'inspect docs' }), options);
+  assert.equal(handleClaudeHook(pre('agent-budget', 'Agent', { prompt: 'inspect tests', async_launched: false }), options), null);
+  const denied = handleClaudeHook(pre('agent-budget', 'Agent', { prompt: 'inspect docs', async_launched: false }, root, 'Agent-2'), options);
   assert.match(denied.hookSpecificOutput.permissionDecisionReason, /S\/(?:TOTAL_AGENT_LIMIT|CONCURRENT_AGENT_LIMIT)/);
 });
 
@@ -367,13 +366,16 @@ test('parallel Claude Agent hook processes cannot oversubscribe concurrent-agent
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   handleClaudeHook(prompt('parallel-agent', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- one subagent'), { dataDir });
   const entrypoint = path.join(root, 'hooks', 'stop-that-shit-claude.cjs');
-  const payload = JSON.stringify(pre('parallel-agent', 'Agent', { prompt: 'inspect' }));
-  const children = [0, 1].map(() => require('node:child_process').spawn(process.execPath, [entrypoint], {
+  const payloads = [
+    JSON.stringify(pre('parallel-agent', 'Agent', { prompt: 'inspect', async_launched: false }, root, 'Agent-1')),
+    JSON.stringify(pre('parallel-agent', 'Agent', { prompt: 'inspect', async_launched: false }, root, 'Agent-2'))
+  ];
+  const children = payloads.map((payload) => require('node:child_process').spawn(process.execPath, [entrypoint], {
     cwd: root,
     env: { ...process.env, CLAUDE_PLUGIN_ROOT: root, CLAUDE_PLUGIN_DATA: dataDir },
     stdio: ['pipe', 'pipe', 'pipe']
   }));
-  for (const child of children) child.stdin.end(payload);
+  children.forEach((child, index) => child.stdin.end(payloads[index]));
   return Promise.all(children.map((child) => new Promise((resolve, reject) => {
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });

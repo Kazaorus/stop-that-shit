@@ -4,6 +4,7 @@ const {
   handlePiPrompt,
   handlePiTool,
   handlePiToolAfter,
+  handlePiSessionEnd,
   isPiControlInput
 } = require('./pi-hooks.cjs');
 
@@ -110,6 +111,14 @@ function registerPiExtension(pi, options = {}) {
       };
     } catch {
       notify(ctx, 'Stop That Shit failed open while returning watch context.');
+    }
+  });
+
+  pi.on('session_shutdown', (event, ctx) => {
+    try {
+      handlePiSessionEnd(event, sessionContext(ctx), options);
+    } catch {
+      notify(ctx, 'Stop That Shit failed open while closing the session.');
     }
   });
 }

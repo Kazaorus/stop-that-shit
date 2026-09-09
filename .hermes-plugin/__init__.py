@@ -69,6 +69,8 @@ def _tool(**kwargs: Any) -> dict[str, Any] | None:
             "tool_call_id": kwargs.get("tool_call_id"),
             "turn_id": kwargs.get("turn_id"),
             "user_message": kwargs.get("user_message", ""),
+            "async_launched": kwargs.get("async_launched", kwargs.get("asyncLaunched")),
+            "run_in_background": kwargs.get("run_in_background", kwargs.get("runInBackground")),
         },
     })
     return result if result and result.get("action") == "block" else None
@@ -91,6 +93,8 @@ def _post_tool(**kwargs: Any) -> None:
             "status": kwargs.get("status"),
             "error_type": kwargs.get("error_type"),
             "error_message": kwargs.get("error_message"),
+            "async_launched": kwargs.get("async_launched", kwargs.get("asyncLaunched")),
+            "run_in_background": kwargs.get("run_in_background", kwargs.get("runInBackground")),
         },
     })
 

@@ -34,11 +34,13 @@ Pi Extension          ----> Pi Adapter -----------/  decision(contract, action)
   delegation ledger so concurrent Hook processes cannot oversubscribe either
   agent limit.
 - `src/delegation-state.cjs` owns pure reservation transitions. Total usage is
-  consumed by `action.before`; active reservation units are released by
-  `action.after`, `subagent.stop`, or `session.end`. The ledger also keeps
-  session-local agent IDs already seen by lifecycle events so delayed duplicate
-  starts cannot bind a later reservation; this metadata is not active usage or
-  runtime audit data.
+  consumed by `action.before`; only an explicitly synchronous `action.after`
+  releases its active units. Background or unknown-status work remains reserved
+  until `subagent.stop` or `session.end`; session end clears activity but never
+  refunds total usage. The ledger also keeps accepted action IDs and session-local
+  agent stop/start metadata so retries, delayed duplicate starts, and stop-before-
+  start events cannot charge or bind a later reservation; this metadata is not
+  active usage or runtime audit data.
 - `src/runtime-audit.cjs` appends and reads metadata-only decision events.
 - `src/runtime-annotations.cjs` appends independent human labels.
 
@@ -75,8 +77,9 @@ A Hermes `delegate_task` call reserves the total and concurrent limits by the
 number of child agents it can start: one for a non-empty `goal`, or
 `tasks.length` for a batch. The complete count is checked and reserved
 atomically before the tool runs; an insufficient limit rejects the whole batch
-without consuming any units. Completion events release active units but never
-refund the cumulative total.
+without consuming any units. A confirmed synchronous completion releases active
+units; background or unknown-status calls remain reserved until an explicit
+subagent stop or session end, and never refund the cumulative total.
 `action=list`, `action=steer`, and `action=stop` are control operations and
 consume zero budget units.
 
@@ -87,12 +90,16 @@ the SDK `client.session.message` call, injects contract context with
 `client.session.prompt({ noReply: true })`, and maps child sessions to the root
 contract so a subagent cannot silently replace user authority.
 
-Pi maps `input`, `before_agent_start`, `tool_call`, and `tool_result`. The first
-two arm and inject the shared contract; `tool_call` is the deny-capable boundary;
-`tool_result` carries observation-only context without blocking. Mid-turn
-contract switches are not applied to the active turn. The optional official
-`subagent` tool is budgeted at its parent call, while cross-process contract
-inheritance remains outside the supported boundary.
+Pi maps `input`, `before_agent_start`, `tool_call`, `tool_result`, and
+`session_shutdown`. The first two arm and inject the shared contract;
+`tool_call` is the deny-capable boundary; `tool_result` is the completion signal
+for synchronous tools and carries observation-only context without blocking.
+An explicitly background or otherwise unconfirmed subagent remains reserved
+because the current Pi extension surface has no child-specific stop event;
+`session_shutdown` clears active reservations. Mid-turn contract switches are
+not applied to the active turn. The optional official `subagent` tool is budgeted
+at its parent call, while cross-process contract inheritance remains outside the
+supported boundary.
 
 ## Control and evidence boundaries
 

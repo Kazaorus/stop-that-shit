@@ -327,7 +327,8 @@ test('Hermes lifecycle hooks release subagents and clear reservations without ou
   const options = workspace(t);
   handleHermesHook(prompt('lifecycle-session', '$stop-that-shit change total-agents=2 concurrent-agents=2 -- delegate'), options);
   assert.equal(handleHermesHook(pre('lifecycle-session', 'delegate_task', {
-    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
+    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }],
+    async_launched: false
   }), options), null);
   assert.equal(readState('lifecycle-session', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 2);
 
@@ -343,7 +344,8 @@ test('Hermes lifecycle hooks release subagents and clear reservations without ou
   assert.equal(readState('lifecycle-session', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 1);
 
   assert.equal(handleHermesHook(post('lifecycle-session', 'delegate_task', {
-    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
+    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }],
+    async_launched: false
   }), options), null);
   assert.deepEqual(readState('lifecycle-session', options.dataDir).delegation.reservations, {});
 

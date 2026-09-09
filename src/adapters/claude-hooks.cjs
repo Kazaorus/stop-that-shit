@@ -9,6 +9,7 @@ const {
   extractAffectedPaths,
   isUnboundedDelegation
 } = require('./claude-tool-classifier.cjs');
+const { optionalIdentifier, readAsyncLaunched } = require('./lifecycle-fields.cjs');
 
 const EVENT_KIND = {
   SessionStart: 'session.start',
@@ -71,31 +72,37 @@ function toControlEvent(input) {
   }
 
   if (kind === 'action.after') {
-    const actionId = [input.tool_use_id, input.tool_call_id]
-      .find((value) => typeof value === 'string' && value.trim());
+    const actionId = optionalIdentifier(input.tool_use_id, input.tool_call_id);
     if (!actionId) return null;
     event.action = {
       id: actionId
     };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input);
+    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
   }
 
   if (kind === 'action.before') {
+    const mutability = classifyClaudeTool(input.tool_name, input.tool_input);
+    const actionId = optionalIdentifier(input.tool_use_id, input.tool_call_id);
+    if (mutability === 'delegate' && !actionId) return null;
     event.action = {
-      id: input.tool_use_id || null,
+      id: actionId,
       name: String(input.tool_name || 'unknown'),
       input: input.tool_input,
-      mutability: classifyClaudeTool(input.tool_name, input.tool_input),
+      mutability,
       hashIntent: detectHashIntent(input.tool_name, input.tool_input),
       dependencyIntent: detectDependencyIntent(input.tool_name, input.tool_input, input.cwd),
       affectedPaths: extractAffectedPaths(input.tool_name, input.tool_input, input.cwd),
       cwd: input.cwd,
       unboundedDelegation: isUnboundedDelegation(input.tool_name)
     };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input);
+    if (mutability === 'delegate' && asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
   }
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
-    event.agentId = input.agent_id || input.agentId || null;
-    const reservationId = input.reservation_id || input.reservationId;
+    event.agentId = optionalIdentifier(input.agent_id, input.agentId);
+    const reservationId = optionalIdentifier(input.reservation_id, input.reservationId);
     if (reservationId) event.reservationId = reservationId;
   }
 

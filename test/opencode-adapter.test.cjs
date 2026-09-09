@@ -64,6 +64,7 @@ test('OpenCode Adapter maps tool completion and session end to ControlEvent v1',
   assert.equal(after.kind, 'action.after');
   assert.equal(after.sessionId, 'root');
   assert.equal(after.action.id, 'task-1');
+  assert.equal(after.action.asyncLaunched, false);
 
   const end = handleOpenCodeSessionEnd(
     { sessionID: 'root' },

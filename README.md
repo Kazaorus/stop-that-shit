@@ -232,8 +232,12 @@ $stop-that-shit change total-agents=1 concurrent-agents=1 -- 使用一个独立�
 修改同一 session 的限制而重置；`concurrent-agents=N` 是当前活动 reservation
 占用的并发槽位。两个限制同时生效，未设置时均为 `Number.MAX_SAFE_INTEGER`，
 设置为 `0` 会禁止 delegation。一次 batch 超出任一限制时整批拒绝，不排队也不
-部分执行；明确的 `action.after`、subagent stop 或 session end 会释放并发槽位，
-但不会退还总量。旧的 `agents=N` 已移除，会返回迁移错误。
+部分执行。只有明确确认同步完成的 `action.after` 才会释放对应槽位；后台或状态
+未知的调用会一直保留到明确的 subagent stop 或 session end。session end 会清理
+活动槽位，但不会退还总量。适配器不会按事件到达顺序猜测 reservation 的归属。
+
+旧的 `agents=N` 仍暂时兼容，但已弃用：它映射为 `total-agents=N` 并给出 warning。
+如果它与 `total-agents=M` 冲突，整个指令不更新合同；非法数值也不会部分更新。
 
 不知道全部受影响文件时，不要硬写 `files=`。让 agent 沿真实调用链检查，把完成任务必需的 caller、fixture 和测试一起改完。
 

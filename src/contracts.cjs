@@ -23,7 +23,7 @@ function directiveHead(prompt, matchEnd) {
   const tail = prompt.slice(matchEnd).trimStart();
   const boundaries = [tail.indexOf('--'), tail.search(/:(?=\s|$)/), tail.indexOf('\n')]
     .filter((index) => index >= 0);
-  const end = boundaries.length ? Math.min(...boundaries) : Math.min(tail.length, 80);
+  const end = boundaries.length ? Math.min(...boundaries) : tail.length;
   return tail.slice(0, end).trim();
 }
 
@@ -33,17 +33,36 @@ function parseDirective(prompt) {
 
   const head = directiveHead(prompt, mention.index + mention[0].length);
   const tokens = head.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean);
-  const parsed = { mentioned: true, error: null };
+  const parsed = { mentioned: true, error: null, warning: null };
+  let legacyAgentLimit = null;
+  let legacyAgentToken = null;
+  let canonicalAgentLimit = null;
 
   for (const rawToken of tokens) {
     const token = rawToken.toLowerCase();
     if (MODES.has(token)) parsed.mode = token;
     if (LEVELS.has(token)) parsed.level = token;
-    if (/^agents(?:=|$)/i.test(rawToken)) {
+    const legacyAgents = /^agents=(.*)$/i.exec(rawToken);
+    if (legacyAgents) {
+      const value = parseAgentLimit(legacyAgents[1]);
+      if (value === null) {
+        parsed.error = invalidAgentLimit(rawToken);
+        break;
+      }
+      legacyAgentLimit = value;
+      legacyAgentToken = rawToken;
+      parsed.warning = {
+        code: 'DEPRECATED_AGENT_DIRECTIVE',
+        token: rawToken,
+        message: 'The agents=N directive is deprecated; use total-agents=N.'
+      };
+      continue;
+    }
+    if (/^agents$/i.test(rawToken)) {
       parsed.error = {
         code: 'LEGACY_AGENT_DIRECTIVE',
         token: rawToken,
-        message: 'The agents=N directive was removed; use total-agents=N and/or concurrent-agents=N.'
+        message: 'The agents directive requires a numeric value; use total-agents=N.'
       };
       break;
     }
@@ -54,6 +73,7 @@ function parseDirective(prompt) {
         parsed.error = invalidAgentLimit(rawToken);
         break;
       }
+      canonicalAgentLimit = value;
       parsed.totalAgentBudget = value;
     }
     const concurrentAgents = /^concurrent-agents=(.*)$/i.exec(rawToken);
@@ -71,6 +91,17 @@ function parseDirective(prompt) {
     if (files) parsed.allowedPaths = files[1].split('|').map((value) => value.replace(/\\/g, '/')).filter(Boolean);
     const dependencies = /^deps=(deny|ask|allow)$/.exec(token);
     if (dependencies && SCOPE_POLICIES.has(dependencies[1])) parsed.dependencyPolicy = dependencies[1];
+  }
+
+  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit !== null && legacyAgentLimit !== canonicalAgentLimit) {
+    parsed.error = {
+      code: 'CONFLICTING_AGENT_LIMITS',
+      token: legacyAgentToken,
+      message: `${legacyAgentToken} conflicts with total-agents=${canonicalAgentLimit}.`
+    };
+  }
+  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit === null) {
+    parsed.totalAgentBudget = legacyAgentLimit;
   }
 
   return parsed;
@@ -116,7 +147,15 @@ function naturalCorrection(prompt, previous) {
 }
 
 function parseContractPrompt(prompt, previousContract = defaultContract()) {
-  const previous = { ...defaultContract(), ...previousContract };
+  const supplied = previousContract && typeof previousContract === 'object' ? previousContract : {};
+  const previous = { ...defaultContract(), ...supplied };
+  if (
+    !Object.prototype.hasOwnProperty.call(supplied, 'totalAgentBudget')
+    && Number.isSafeInteger(supplied.agentBudget)
+    && supplied.agentBudget >= 0
+  ) {
+    previous.totalAgentBudget = supplied.agentBudget;
+  }
   delete previous.agentBudget;
   delete previous.agentsUsed;
   const directive = parseDirective(String(prompt || ''));
@@ -131,6 +170,7 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
         changed: false,
         directive: true,
         correction: Boolean(correction),
+        warning: null,
         error: directive.error
       };
     }
@@ -186,7 +226,14 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
     next.level = 'watch';
   }
 
-  return { contract: next, changed, directive: Boolean(directive), correction: Boolean(correction), error: null };
+  return {
+    contract: next,
+    changed,
+    directive: Boolean(directive),
+    correction: Boolean(correction),
+    warning: directive && directive.warning ? directive.warning : null,
+    error: null
+  };
 }
 
 module.exports = {

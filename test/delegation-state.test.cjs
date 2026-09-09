@@ -24,6 +24,7 @@ test('reservation increases total usage and active count by the requested batch 
   assert.equal(next.totalAgentsUsed, 2);
   assert.deepEqual(next.reservations['reservation-1'], {
     actionId: 'action-1',
+    asyncLaunched: null,
     pendingCount: 2,
     agentIds: []
   });
@@ -36,6 +37,7 @@ test('an agent binds once and duplicate starts do not increase activity', () => 
   const duplicate = bindSubagent(bound, 'agent-1', 'reservation-1');
   assert.deepEqual(bound.reservations['reservation-1'], {
     actionId: 'action-1',
+    asyncLaunched: null,
     pendingCount: 1,
     agentIds: ['agent-1']
   });
@@ -49,19 +51,30 @@ test('stopping an unknown or already stopped agent is idempotent', () => {
   const stopped = releaseSubagent(bound, 'agent-1');
   assert.equal(activeDelegationCount(stopped), 0);
   assert.deepEqual(releaseSubagent(stopped, 'agent-1'), stopped);
-  assert.deepEqual(releaseSubagent(stopped, 'unknown'), stopped);
+  const unknownStopped = releaseSubagent(stopped, 'unknown');
+  assert.deepEqual(releaseSubagent(unknownStopped, 'unknown'), unknownStopped);
+  assert.deepEqual(unknownStopped.stoppedAgentIds, ['agent-1', 'unknown']);
 });
 
-test('late duplicate starts do not bind a later reservation', () => {
+test('stop-before-start does not reactivate a late agent event', () => {
+  let state = reserveDelegation(emptyDelegation(), 'reservation-1', 'action-1', 1);
+  state = releaseSubagent(state, 'agent-1');
+  state = bindSubagent(state, 'agent-1', 'reservation-1');
+  assert.equal(activeDelegationCount(state), 0);
+  assert.equal(state.reservations['reservation-1'], undefined);
+  assert.deepEqual(state.stoppedAgentIds, ['agent-1']);
+});
+
+test('late duplicate starts do not reactivate a later reservation', () => {
   let state = reserveDelegation(emptyDelegation(), 'reservation-1', 'action-1', 1);
   state = bindSubagent(state, 'agent-1', 'reservation-1');
   state = releaseSubagent(state, 'agent-1');
   state = reserveDelegation(state, 'reservation-2', 'action-2', 1);
   const duplicate = bindSubagent(state, 'agent-1', 'reservation-2');
 
-  assert.deepEqual(duplicate, state);
-  assert.equal(activeDelegationCount(duplicate), 1);
-  assert.equal(duplicate.reservations['reservation-2'].pendingCount, 1);
+  assert.equal(activeDelegationCount(duplicate), 0);
+  assert.equal(duplicate.reservations['reservation-2'], undefined);
+  assert.deepEqual(duplicate.stoppedAgentIds, ['agent-1']);
 });
 
 test('late duplicate starts remain idempotent after action.after removed the reservation', () => {
@@ -118,7 +131,7 @@ test('readState migrates legacy agent usage to schema 2', (t) => {
   assert.equal(state.contract.mode, 'change');
   assert.equal(state.contract.hashPolicy, 'allow');
   assert.deepEqual(state.contract.allowedPaths, ['src/**']);
-  assert.equal(state.contract.totalAgentBudget, Number.MAX_SAFE_INTEGER);
+  assert.equal(state.contract.totalAgentBudget, 8);
   assert.equal(state.contract.concurrentAgentBudget, Number.MAX_SAFE_INTEGER);
   assert.equal('agentBudget' in state.contract, false);
   assert.equal('agentsUsed' in state.contract, false);
@@ -127,5 +140,21 @@ test('readState migrates legacy agent usage to schema 2', (t) => {
   assert.deepEqual(state.delegation.agentIdsSeen, []);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).delegation.agentIdsSeen, []);
   assert.equal(state.directiveError, null);
+  assert.equal(state.directiveWarning, null);
   assert.equal(state.lastPromptContext, 'legacy context');
+});
+
+test('readState preserves a legacy zero agent budget', (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-state-zero-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const file = statePath('legacy-zero', dataDir);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    schemaVersion: 1,
+    contract: { mode: 'change', level: 'guard', agentBudget: 0, agentsUsed: 2 }
+  }));
+
+  const state = readState('legacy-zero', dataDir);
+  assert.equal(state.contract.totalAgentBudget, 0);
+  assert.equal(state.delegation.totalAgentsUsed, 2);
 });

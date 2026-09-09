@@ -42,10 +42,10 @@ function input(text, extra = {}) {
   return { type: 'input', text, source: 'interactive', ...extra };
 }
 
-test('Pi Extension registers only the input, context, pre-tool, and watch-result surface', () => {
+test('Pi Extension registers the documented tool and session lifecycle surface', () => {
   const pi = fakePi();
   registerPiExtension(pi, { dataDir: '/unused' });
-  assert.deepEqual([...pi.handlers.keys()], ['input', 'before_agent_start', 'tool_call', 'tool_result']);
+  assert.deepEqual([...pi.handlers.keys()], ['input', 'before_agent_start', 'tool_call', 'tool_result', 'session_shutdown']);
 });
 
 test('interactive input arms review, injects context, and blocks a write without terminate', (t) => {
@@ -159,7 +159,7 @@ test('delegation reservation is released on tool_result', (t) => {
     type: 'tool_call',
     toolCallId,
     toolName: 'subagent',
-    input: { agent: 'scout', task }
+    input: { agent: 'scout', task, async_launched: false }
   });
   assert.equal(pi.handlers.get('tool_call')(delegation('subagent-1', 'inspect'), ctx), undefined);
   pi.handlers.get('tool_result')({
@@ -168,6 +168,22 @@ test('delegation reservation is released on tool_result', (t) => {
   }, ctx);
 
   assert.equal(pi.handlers.get('tool_call')(delegation('subagent-2', 'inspect again'), ctx), undefined);
+});
+
+test('Pi session shutdown clears active reservations without refunding total usage', (t) => {
+  const dataDir = workspace(t);
+  const pi = fakePi();
+  const ctx = fakeContext('shutdown-session');
+  registerPiExtension(pi, { dataDir });
+  pi.handlers.get('input')(input('$stop-that-shit change total-agents=2 concurrent-agents=1 -- delegate'), ctx);
+  pi.handlers.get('tool_call')({
+    type: 'tool_call', toolCallId: 'subagent-1', toolName: 'subagent',
+    input: { agent: 'scout', task: 'inspect', async_launched: true }
+  }, ctx);
+  pi.handlers.get('session_shutdown')({ type: 'session_shutdown', reason: 'quit' }, ctx);
+  const state = readState('shutdown-session', dataDir);
+  assert.deepEqual(state.delegation.reservations, {});
+  assert.equal(state.delegation.totalAgentsUsed, 1);
 });
 
 test('Pi ignores tool_result events without toolCallId without reporting an adapter failure', (t) => {

@@ -151,6 +151,16 @@ function decide({ contract, action, state = {} }) {
     );
   }
 
+  if (action.mutability === 'delegate' && action.duplicateActionConflict) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'DUPLICATE_ACTION_ID',
+      'The host reused an action identifier with a different delegation count, so the request cannot be charged safely.',
+      'Use a unique action identifier for each delegation call.'
+    );
+  }
+
   const totalAgentBudget = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
     ? contract.totalAgentBudget
     : DEFAULT_AGENT_LIMIT;
@@ -161,7 +171,7 @@ function decide({ contract, action, state = {} }) {
     ? state.delegation.totalAgentsUsed
     : 0;
   const activeAgents = activeDelegationCount(state.delegation);
-  if (action.mutability === 'delegate' && totalAgentsUsed + delegationCount > totalAgentBudget) {
+  if (action.mutability === 'delegate' && !action.alreadyReserved && totalAgentsUsed + delegationCount > totalAgentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
@@ -170,7 +180,7 @@ function decide({ contract, action, state = {} }) {
       'Continue locally or increase total-agents=N in a corrected directive.'
     );
   }
-  if (action.mutability === 'delegate' && activeAgents + delegationCount > concurrentAgentBudget) {
+  if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > concurrentAgentBudget) {
     return decision(
       controlledOutcome(level),
       'S',

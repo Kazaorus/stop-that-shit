@@ -25,8 +25,11 @@ function freshState() {
     delegation: {
       totalAgentsUsed: 0,
       reservations: {},
-      agentIdsSeen: []
+      agentIdsSeen: [],
+      stoppedAgentIds: [],
+      acceptedActions: {}
     },
+    directiveWarning: null,
     directiveError: null,
     lastPromptContext: null
   };
@@ -44,6 +47,7 @@ function normalizeDelegation(value, legacyUsed) {
       if (!reservation || typeof reservation !== 'object') continue;
       reservations[reservationId] = {
         actionId: typeof reservation.actionId === 'string' ? reservation.actionId : '',
+        asyncLaunched: typeof reservation.asyncLaunched === 'boolean' ? reservation.asyncLaunched : null,
         pendingCount: safeCount(reservation.pendingCount),
         agentIds: Array.isArray(reservation.agentIds)
           ? [...new Set(reservation.agentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
@@ -51,13 +55,26 @@ function normalizeDelegation(value, legacyUsed) {
       };
     }
   }
+  const acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
+    ? Object.fromEntries(Object.entries(source.acceptedActions)
+      .filter(([actionId, count]) => typeof actionId === 'string' && actionId
+        && Number.isSafeInteger(count) && count >= 0))
+    : {};
+  for (const reservation of Object.values(reservations)) {
+    if (!reservation.actionId || Object.prototype.hasOwnProperty.call(acceptedActions, reservation.actionId)) continue;
+    acceptedActions[reservation.actionId] = reservation.pendingCount + reservation.agentIds.length;
+  }
   const hasNewTotal = Number.isSafeInteger(source.totalAgentsUsed) && source.totalAgentsUsed >= 0;
   return {
     totalAgentsUsed: hasNewTotal ? source.totalAgentsUsed : safeCount(legacyUsed),
     reservations,
     agentIdsSeen: Array.isArray(source.agentIdsSeen)
       ? [...new Set(source.agentIdsSeen.filter((agentId) => typeof agentId === 'string' && agentId))]
-      : []
+      : [],
+    stoppedAgentIds: Array.isArray(source.stoppedAgentIds)
+      ? [...new Set(source.stoppedAgentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
+      : [],
+    acceptedActions
   };
 }
 
@@ -65,6 +82,12 @@ function normalizeState(parsed) {
   const fresh = freshState();
   const legacyContract = parsed.contract && typeof parsed.contract === 'object' ? parsed.contract : {};
   const contract = { ...fresh.contract, ...legacyContract };
+  const legacyBudget = Number.isSafeInteger(legacyContract.agentBudget) && legacyContract.agentBudget >= 0
+    ? legacyContract.agentBudget
+    : null;
+  if (!Object.prototype.hasOwnProperty.call(legacyContract, 'totalAgentBudget') && legacyBudget !== null) {
+    contract.totalAgentBudget = legacyBudget;
+  }
   delete contract.agentBudget;
   delete contract.agentsUsed;
   if (!Number.isSafeInteger(contract.totalAgentBudget) || contract.totalAgentBudget < 0) {
@@ -77,6 +100,7 @@ function normalizeState(parsed) {
     schemaVersion: 2,
     contract,
     delegation: normalizeDelegation(parsed.delegation, legacyContract.agentsUsed),
+    directiveWarning: parsed.directiveWarning && typeof parsed.directiveWarning === 'object' ? parsed.directiveWarning : null,
     directiveError: parsed.directiveError && typeof parsed.directiveError === 'object' ? parsed.directiveError : null,
     lastPromptContext: parsed.lastPromptContext ?? null
   };
@@ -88,12 +112,19 @@ function readState(sessionId, override) {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     const normalized = normalizeState(parsed);
     const hasDelegation = Object.prototype.hasOwnProperty.call(parsed, 'delegation');
+    const hasDirectiveWarning = Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning');
     const hasDirectiveError = Object.prototype.hasOwnProperty.call(parsed, 'directiveError');
     const hasPromptContext = Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext');
     const hasAgentIdsSeen = parsed.delegation
       && typeof parsed.delegation === 'object'
       && Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen');
-    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen) {
+    const hasStoppedAgentIds = parsed.delegation
+      && typeof parsed.delegation === 'object'
+      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds');
+    const hasAcceptedActions = parsed.delegation
+      && typeof parsed.delegation === 'object'
+      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions');
+    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveWarning || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen || !hasStoppedAgentIds || !hasAcceptedActions) {
       writeState(sessionId, normalized, override);
     }
     return normalized;

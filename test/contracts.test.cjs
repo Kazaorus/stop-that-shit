@@ -65,12 +65,14 @@ test('total and concurrent agent limits are parsed independently', () => {
   assert.equal(result.contract.totalAgentBudget, 3);
   assert.equal(result.contract.concurrentAgentBudget, 2);
   assert.equal(result.error, null);
+  assert.equal(result.warning, null);
 });
 
 test('zero is accepted for both agent limits', () => {
   const result = parseContractPrompt('$stop-that-shit change total-agents=0 concurrent-agents=0 -- implement it');
   assert.equal(result.contract.totalAgentBudget, 0);
   assert.equal(result.contract.concurrentAgentBudget, 0);
+  assert.equal(result.error, null);
 });
 
 test('invalid agent limits return a structured error without changing the contract', () => {
@@ -90,7 +92,17 @@ test('invalid agent limits return a structured error without changing the contra
   }
 });
 
-test('legacy agents directive returns a migration error without partial updates', () => {
+test('legacy agents directive maps to total with a deprecation warning', () => {
+  const result = parseContractPrompt('$stop-that-shit change agents=9 -- implement it');
+  assert.equal(result.contract.totalAgentBudget, 9);
+  assert.equal(result.contract.concurrentAgentBudget, Number.MAX_SAFE_INTEGER);
+  assert.equal(result.error, null);
+  assert.equal(result.warning.code, 'DEPRECATED_AGENT_DIRECTIVE');
+  assert.equal(result.warning.token, 'agents=9');
+  assert.equal(result.changed, true);
+});
+
+test('conflicting legacy and canonical total limits reject without partial updates', () => {
   const previous = {
     ...defaultContract(),
     mode: 'review',
@@ -99,10 +111,24 @@ test('legacy agents directive returns a migration error without partial updates'
     concurrentAgentBudget: 3
   };
   const result = parseContractPrompt('$stop-that-shit change total-agents=9 agents=1 -- implement it', previous);
-  assert.equal(result.error.code, 'LEGACY_AGENT_DIRECTIVE');
+  assert.equal(result.error.code, 'CONFLICTING_AGENT_LIMITS');
   assert.equal(result.error.token, 'agents=1');
   assert.equal(result.changed, false);
   assert.deepEqual(result.contract, previous);
+});
+
+test('matching legacy and canonical total limits are accepted with a warning', () => {
+  const result = parseContractPrompt('$stop-that-shit change total-agents=9 agents=9 -- implement it');
+  assert.equal(result.contract.totalAgentBudget, 9);
+  assert.equal(result.error, null);
+  assert.equal(result.warning.code, 'DEPRECATED_AGENT_DIRECTIVE');
+});
+
+test('a long path does not truncate a later agent limit', () => {
+  const longPath = `src/${'nested/'.repeat(20)}file.cjs`;
+  const result = parseContractPrompt(`$stop-that-shit change files=${longPath} total-agents=7 -- implement it`);
+  assert.equal(result.contract.totalAgentBudget, 7);
+  assert.deepEqual(result.contract.allowedPaths, [longPath]);
 });
 
 test('implicit invocation stays watch-only until mode is confirmed', () => {
