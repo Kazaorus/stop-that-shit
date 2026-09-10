@@ -6,6 +6,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { defaultContract } = require('./contracts.cjs');
 
+const CURRENT_SCHEMA_VERSION = 3;
+
 function dataRoot(override) {
   return override || process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA || path.join(os.tmpdir(), 'stop-that-shit-dev');
 }
@@ -20,10 +22,9 @@ function statePath(sessionId, override) {
 
 function freshState() {
   return {
-    schemaVersion: 2,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     contract: defaultContract(),
     delegation: {
-      totalAgentsUsed: 0,
       reservations: {},
       agentIdsSeen: [],
       stoppedAgentIds: [],
@@ -39,7 +40,24 @@ function safeCount(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function normalizeDelegation(value, legacyUsed) {
+function validAgentBudget(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function migratedAgentBudget(contract) {
+  const legacyBudget = validAgentBudget(contract.agentBudget);
+  if (legacyBudget !== null) return legacyBudget;
+
+  const concurrentBudget = validAgentBudget(contract.concurrentAgentBudget);
+  if (concurrentBudget !== null && concurrentBudget !== Number.MAX_SAFE_INTEGER) return concurrentBudget;
+
+  const totalBudget = validAgentBudget(contract.totalAgentBudget);
+  if (totalBudget !== null && totalBudget !== Number.MAX_SAFE_INTEGER) return totalBudget;
+
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function normalizeDelegation(value) {
   const source = value && typeof value === 'object' ? value : {};
   const reservations = {};
   if (source.reservations && typeof source.reservations === 'object') {
@@ -64,9 +82,7 @@ function normalizeDelegation(value, legacyUsed) {
     if (!reservation.actionId || Object.prototype.hasOwnProperty.call(acceptedActions, reservation.actionId)) continue;
     acceptedActions[reservation.actionId] = reservation.pendingCount + reservation.agentIds.length;
   }
-  const hasNewTotal = Number.isSafeInteger(source.totalAgentsUsed) && source.totalAgentsUsed >= 0;
   return {
-    totalAgentsUsed: hasNewTotal ? source.totalAgentsUsed : safeCount(legacyUsed),
     reservations,
     agentIdsSeen: Array.isArray(source.agentIdsSeen)
       ? [...new Set(source.agentIdsSeen.filter((agentId) => typeof agentId === 'string' && agentId))]
@@ -80,29 +96,48 @@ function normalizeDelegation(value, legacyUsed) {
 
 function normalizeState(parsed) {
   const fresh = freshState();
-  const legacyContract = parsed.contract && typeof parsed.contract === 'object' ? parsed.contract : {};
+  const source = parsed && typeof parsed === 'object' ? parsed : {};
+  const legacyContract = source.contract && typeof source.contract === 'object' ? source.contract : {};
   const contract = { ...fresh.contract, ...legacyContract };
-  const legacyBudget = Number.isSafeInteger(legacyContract.agentBudget) && legacyContract.agentBudget >= 0
-    ? legacyContract.agentBudget
-    : null;
-  if (!Object.prototype.hasOwnProperty.call(legacyContract, 'totalAgentBudget') && legacyBudget !== null) {
-    contract.totalAgentBudget = legacyBudget;
-  }
   delete contract.agentBudget;
+  contract.agentBudget = migratedAgentBudget(legacyContract);
+  delete contract.totalAgentBudget;
+  delete contract.concurrentAgentBudget;
   delete contract.agentsUsed;
-  if (!Number.isSafeInteger(contract.totalAgentBudget) || contract.totalAgentBudget < 0) {
-    contract.totalAgentBudget = fresh.contract.totalAgentBudget;
-  }
-  if (!Number.isSafeInteger(contract.concurrentAgentBudget) || contract.concurrentAgentBudget < 0) {
-    contract.concurrentAgentBudget = fresh.contract.concurrentAgentBudget;
-  }
+  delete contract.directiveWarning;
+  delete contract.directiveError;
+  const delegation = normalizeDelegation(source.delegation);
+  const directiveWarning = source.directiveWarning && typeof source.directiveWarning === 'object'
+    && source.directiveWarning.code !== 'DEPRECATED_AGENT_DIRECTIVE'
+    ? source.directiveWarning
+    : null;
+  const directiveError = source.directiveError && typeof source.directiveError === 'object'
+    && source.directiveError.code !== 'LEGACY_AGENT_DIRECTIVE'
+    ? source.directiveError
+    : null;
+  const hasCurrentContract = Object.prototype.hasOwnProperty.call(legacyContract, 'agentBudget')
+    && !Object.prototype.hasOwnProperty.call(legacyContract, 'totalAgentBudget')
+    && !Object.prototype.hasOwnProperty.call(legacyContract, 'concurrentAgentBudget')
+    && !Object.prototype.hasOwnProperty.call(legacyContract, 'agentsUsed');
+  const hasCurrentDelegation = source.delegation
+    && typeof source.delegation === 'object'
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'reservations')
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'agentIdsSeen')
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'stoppedAgentIds')
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'acceptedActions')
+    && !Object.prototype.hasOwnProperty.call(source.delegation, 'totalAgentsUsed');
+  const migrated = source.schemaVersion !== CURRENT_SCHEMA_VERSION
+    || !hasCurrentContract
+    || !hasCurrentDelegation
+    || directiveWarning === null && source.directiveWarning !== null
+    || directiveError === null && source.directiveError !== null;
   return {
-    schemaVersion: 2,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     contract,
-    delegation: normalizeDelegation(parsed.delegation, legacyContract.agentsUsed),
-    directiveWarning: parsed.directiveWarning && typeof parsed.directiveWarning === 'object' ? parsed.directiveWarning : null,
-    directiveError: parsed.directiveError && typeof parsed.directiveError === 'object' ? parsed.directiveError : null,
-    lastPromptContext: parsed.lastPromptContext ?? null
+    delegation,
+    directiveWarning,
+    directiveError,
+    lastPromptContext: migrated ? null : source.lastPromptContext ?? null
   };
 }
 
@@ -111,20 +146,27 @@ function readState(sessionId, override) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     const normalized = normalizeState(parsed);
-    const hasDelegation = Object.prototype.hasOwnProperty.call(parsed, 'delegation');
-    const hasDirectiveWarning = Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning');
-    const hasDirectiveError = Object.prototype.hasOwnProperty.call(parsed, 'directiveError');
-    const hasPromptContext = Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext');
-    const hasAgentIdsSeen = parsed.delegation
-      && typeof parsed.delegation === 'object'
-      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen');
-    const hasStoppedAgentIds = parsed.delegation
-      && typeof parsed.delegation === 'object'
-      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds');
-    const hasAcceptedActions = parsed.delegation
-      && typeof parsed.delegation === 'object'
-      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions');
-    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveWarning || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen || !hasStoppedAgentIds || !hasAcceptedActions) {
+    if (!parsed || typeof parsed !== 'object'
+      || parsed.schemaVersion !== CURRENT_SCHEMA_VERSION
+      || !parsed.contract || typeof parsed.contract !== 'object'
+      || !Object.prototype.hasOwnProperty.call(parsed.contract, 'agentBudget')
+      || !validAgentBudget(parsed.contract.agentBudget)
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'totalAgentBudget')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'concurrentAgentBudget')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'agentsUsed')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveWarning')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveError')
+      || !parsed.delegation || typeof parsed.delegation !== 'object'
+      || Object.prototype.hasOwnProperty.call(parsed.delegation, 'totalAgentsUsed')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'reservations')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions')
+      || parsed.directiveWarning?.code === 'DEPRECATED_AGENT_DIRECTIVE'
+      || parsed.directiveError?.code === 'LEGACY_AGENT_DIRECTIVE'
+      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning')
+      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveError')
+      || !Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext')) {
       writeState(sessionId, normalized, override);
     }
     return normalized;

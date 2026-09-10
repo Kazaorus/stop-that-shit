@@ -30,7 +30,7 @@ tests, and shared policy tests:
   normalization and Windows case matching, `NotebookEdit`, `PowerShell`, `Monitor`,
   `EnterWorktree`, and `Workflow` fan-out handling have dedicated regressions;
 - two independent Claude Hook processes cannot oversubscribe a configured
-  `concurrent-agents=1` reservation;
+  `agents=1` reservation;
 - all checked-in `.cjs` files pass `node --check`, all JSON files parse, and the
   release allowlist passes with 188 files;
 - the generated CaseBundle validator matches the checked-in schema, including

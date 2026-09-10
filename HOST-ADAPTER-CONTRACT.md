@@ -16,9 +16,8 @@ Lifecycle context injection is host-specific, but all five adapters map
 available lifecycle signals to the shared protocol. `action.before` reserves a
 delegation batch atomically. An `action.after` releases active units only when
 the host explicitly confirms synchronous completion; background or unknown-status
-work remains reserved until `subagent.stop` or `session.end`. Session end clears
-active units but total usage is never refunded. Adapters require explicit host
-identifiers and never pair reservations by event arrival order.
+work remains reserved until `subagent.stop` or `session.end`. Adapters require
+explicit host identifiers and never pair reservations by event arrival order.
 
 The normalized event is versioned as `ControlEvent v1`:
 
@@ -60,8 +59,8 @@ UserPromptExpansion  -> prompt.submit (Stop That Shit Skill only; optional on ho
 ```
 
 The Claude adapter returns a `PreToolUse` `permissionDecision: "deny"` when the
-shared controller denies an action. `total-agents=N` and
-`concurrent-agents=M` are enforced before a Claude `Agent` tool runs; the
+shared controller denies an action. `agents=N` is enforced before a Claude
+`Agent` tool runs; the
 started subagent binds by an explicit `reservation_id`, and `agent_id` is used
 for stop events. A `PostToolUse` event releases activity only when its payload
 confirms synchronous completion; otherwise the reservation remains active.
@@ -170,9 +169,8 @@ core mode, hash, dependency, file-lock, or agent-budget decisions.
 
 A Hermes `delegate_task` call containing `tasks=[...]` is charged by the actual
 child count: one for a non-empty `goal`, or `tasks.length` for a batch. The
-complete batch is checked against both limits before execution; only confirmed
-synchronous completion releases active slots, without refunding the session
-total.
+complete batch is checked against the active agent limit before execution; only
+confirmed synchronous completion releases active slots.
 
 ## Pi
 
@@ -219,7 +217,7 @@ omitted so the Agent can recover with an in-scope action.
 
 | Hermes surface | Status | Evidence and boundary |
 | --- | --- | --- |
-| Hermes CLI + native Plugin | Supported and tested offline | Real Hermes envelopes, adapter/controller cases, lifecycle entrypoint tests, and parallel total/concurrent reservation tests. |
+| Hermes CLI + native Plugin | Supported and tested offline | Real Hermes envelopes, adapter/controller cases, lifecycle entrypoint tests, and parallel active-reservation tests. |
 | Hermes Gateway | Reload after lifecycle changes | Run `hermes gateway restart` after enabling, disabling, updating, rolling back, or reinstalling the plugin; it is not required on every use. |
 | cron, Kanban worker, ACP, Desktop, or paths bypassing the standard tool dispatcher | Not supported or declared | No adapter contract or matching test exists for these surfaces. |
 

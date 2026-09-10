@@ -57,7 +57,7 @@ test('OpenCode Adapter maps native tool fields to ControlEvent v1', () => {
 test('OpenCode Adapter maps tool completion and session end to ControlEvent v1', (t) => {
   const options = workspace(t);
   const after = toActionAfterEvent(
-    { tool: 'task', sessionID: 'child', callID: 'task-1' },
+    { tool: 'task', sessionID: 'child', callID: 'task-1', async_launched: false },
     { controlSessionID: 'root' }
   );
 
@@ -65,6 +65,12 @@ test('OpenCode Adapter maps tool completion and session end to ControlEvent v1',
   assert.equal(after.sessionId, 'root');
   assert.equal(after.action.id, 'task-1');
   assert.equal(after.action.asyncLaunched, false);
+
+  const unknown = toActionAfterEvent(
+    { tool: 'task', sessionID: 'child', callID: 'task-2' },
+    { controlSessionID: 'root' }
+  );
+  assert.equal(unknown.action.asyncLaunched, undefined);
 
   const end = handleOpenCodeSessionEnd(
     { sessionID: 'root' },

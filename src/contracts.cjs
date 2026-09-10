@@ -10,8 +10,7 @@ function defaultContract() {
   return {
     mode: 'unconfirmed',
     level: 'watch',
-    totalAgentBudget: DEFAULT_AGENT_LIMIT,
-    concurrentAgentBudget: DEFAULT_AGENT_LIMIT,
+    agentBudget: DEFAULT_AGENT_LIMIT,
     hashPolicy: 'deny',
     allowedPaths: null,
     dependencyPolicy: 'ask',
@@ -34,56 +33,36 @@ function parseDirective(prompt) {
   const head = directiveHead(prompt, mention.index + mention[0].length);
   const tokens = head.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean);
   const parsed = { mentioned: true, error: null, warning: null };
-  let legacyAgentLimit = null;
-  let legacyAgentToken = null;
-  let canonicalAgentLimit = null;
 
   for (const rawToken of tokens) {
     const token = rawToken.toLowerCase();
     if (MODES.has(token)) parsed.mode = token;
     if (LEVELS.has(token)) parsed.level = token;
-    const legacyAgents = /^agents=(.*)$/i.exec(rawToken);
-    if (legacyAgents) {
-      const value = parseAgentLimit(legacyAgents[1]);
+    const agents = /^agents=(.*)$/i.exec(rawToken);
+    if (agents) {
+      const value = parseAgentLimit(agents[1]);
       if (value === null) {
         parsed.error = invalidAgentLimit(rawToken);
         break;
       }
-      legacyAgentLimit = value;
-      legacyAgentToken = rawToken;
-      parsed.warning = {
-        code: 'DEPRECATED_AGENT_DIRECTIVE',
-        token: rawToken,
-        message: 'The agents=N directive is deprecated; use total-agents=N.'
-      };
+      parsed.agentBudget = value;
       continue;
     }
     if (/^agents$/i.test(rawToken)) {
       parsed.error = {
-        code: 'LEGACY_AGENT_DIRECTIVE',
+        code: 'INVALID_AGENT_LIMIT',
         token: rawToken,
-        message: 'The agents directive requires a numeric value; use total-agents=N.'
+        message: `${rawToken} must be a non-negative safe integer.`
       };
       break;
     }
-    const totalAgents = /^total-agents=(.*)$/i.exec(rawToken);
-    if (totalAgents) {
-      const value = parseAgentLimit(totalAgents[1]);
-      if (value === null) {
-        parsed.error = invalidAgentLimit(rawToken);
-        break;
-      }
-      canonicalAgentLimit = value;
-      parsed.totalAgentBudget = value;
-    }
-    const concurrentAgents = /^concurrent-agents=(.*)$/i.exec(rawToken);
-    if (concurrentAgents) {
-      const value = parseAgentLimit(concurrentAgents[1]);
-      if (value === null) {
-        parsed.error = invalidAgentLimit(rawToken);
-        break;
-      }
-      parsed.concurrentAgentBudget = value;
+    if (/^(?:total-agents|concurrent-agents)(?:=|$)/i.test(rawToken)) {
+      parsed.error = {
+        code: 'UNSUPPORTED_AGENT_DIRECTIVE',
+        token: rawToken,
+        message: 'Use agents=N to set the maximum number of concurrently active subagents.'
+      };
+      break;
     }
     const hash = /^hash=(deny|ask|allow)$/.exec(token);
     if (hash && HASH_POLICIES.has(hash[1])) parsed.hashPolicy = hash[1];
@@ -91,17 +70,6 @@ function parseDirective(prompt) {
     if (files) parsed.allowedPaths = files[1].split('|').map((value) => value.replace(/\\/g, '/')).filter(Boolean);
     const dependencies = /^deps=(deny|ask|allow)$/.exec(token);
     if (dependencies && SCOPE_POLICIES.has(dependencies[1])) parsed.dependencyPolicy = dependencies[1];
-  }
-
-  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit !== null && legacyAgentLimit !== canonicalAgentLimit) {
-    parsed.error = {
-      code: 'CONFLICTING_AGENT_LIMITS',
-      token: legacyAgentToken,
-      message: `${legacyAgentToken} conflicts with total-agents=${canonicalAgentLimit}.`
-    };
-  }
-  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit === null) {
-    parsed.totalAgentBudget = legacyAgentLimit;
   }
 
   return parsed;
@@ -146,18 +114,30 @@ function naturalCorrection(prompt, previous) {
   return null;
 }
 
-function parseContractPrompt(prompt, previousContract = defaultContract()) {
+function validAgentBudget(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function normalizeContract(previousContract) {
   const supplied = previousContract && typeof previousContract === 'object' ? previousContract : {};
   const previous = { ...defaultContract(), ...supplied };
-  if (
-    !Object.prototype.hasOwnProperty.call(supplied, 'totalAgentBudget')
-    && Number.isSafeInteger(supplied.agentBudget)
-    && supplied.agentBudget >= 0
-  ) {
-    previous.totalAgentBudget = supplied.agentBudget;
-  }
-  delete previous.agentBudget;
+  const suppliedAgentBudget = validAgentBudget(supplied.agentBudget);
+  const concurrentAgentBudget = validAgentBudget(supplied.concurrentAgentBudget);
+  const totalAgentBudget = validAgentBudget(supplied.totalAgentBudget);
+  previous.agentBudget = suppliedAgentBudget
+    ?? (concurrentAgentBudget !== null && concurrentAgentBudget !== DEFAULT_AGENT_LIMIT
+      ? concurrentAgentBudget
+      : totalAgentBudget !== null && totalAgentBudget !== DEFAULT_AGENT_LIMIT
+        ? totalAgentBudget
+        : DEFAULT_AGENT_LIMIT);
+  delete previous.totalAgentBudget;
+  delete previous.concurrentAgentBudget;
   delete previous.agentsUsed;
+  return previous;
+}
+
+function parseContractPrompt(prompt, previousContract = defaultContract()) {
+  const previous = normalizeContract(previousContract);
   const directive = parseDirective(String(prompt || ''));
   const correction = naturalCorrection(String(prompt || ''), previous);
   const next = { ...previous };
@@ -182,12 +162,8 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
       next.level = directive.level;
       changed = true;
     }
-    if (Number.isInteger(directive.totalAgentBudget) && directive.totalAgentBudget !== next.totalAgentBudget) {
-      next.totalAgentBudget = directive.totalAgentBudget;
-      changed = true;
-    }
-    if (Number.isInteger(directive.concurrentAgentBudget) && directive.concurrentAgentBudget !== next.concurrentAgentBudget) {
-      next.concurrentAgentBudget = directive.concurrentAgentBudget;
+    if (Number.isInteger(directive.agentBudget) && directive.agentBudget !== next.agentBudget) {
+      next.agentBudget = directive.agentBudget;
       changed = true;
     }
     if (directive.hashPolicy && directive.hashPolicy !== next.hashPolicy) {

@@ -308,24 +308,24 @@ test('Hermes dependency declarations are detected across every real file mutatio
 test('delegate_task reserves the complete batch or leaves the budget unchanged', (t) => {
   const { handleHermesHook } = adapter();
   const options = workspace(t);
-  handleHermesHook(prompt('batch-denied', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- delegate once'), options);
+  handleHermesHook(prompt('batch-denied', '$stop-that-shit change agents=1 -- delegate once'), options);
   const denied = handleHermesHook(pre('batch-denied', 'delegate_task', {
     tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
   }), options);
-  assert.match(denied.message, /S\/(?:TOTAL_AGENT_LIMIT|CONCURRENT_AGENT_LIMIT)/);
-  assert.equal(readState('batch-denied', options.dataDir).delegation.totalAgentsUsed, 0);
+  assert.match(denied.message, /S\/AGENT_BUDGET_EXHAUSTED/);
+  assert.deepEqual(readState('batch-denied', options.dataDir).delegation.reservations, {});
 
-  handleHermesHook(prompt('batch-allowed', '$stop-that-shit change total-agents=2 concurrent-agents=2 -- delegate twice'), options);
+  handleHermesHook(prompt('batch-allowed', '$stop-that-shit change agents=2 -- delegate twice'), options);
   assert.equal(handleHermesHook(pre('batch-allowed', 'delegate_task', {
     tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
   }), options), null);
-  assert.equal(readState('batch-allowed', options.dataDir).delegation.totalAgentsUsed, 2);
+  assert.equal(readState('batch-allowed', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 2);
 });
 
 test('Hermes lifecycle hooks release subagents and clear reservations without output', (t) => {
   const { handleHermesHook } = adapter();
   const options = workspace(t);
-  handleHermesHook(prompt('lifecycle-session', '$stop-that-shit change total-agents=2 concurrent-agents=2 -- delegate'), options);
+  handleHermesHook(prompt('lifecycle-session', '$stop-that-shit change agents=2 -- delegate'), options);
   assert.equal(handleHermesHook(pre('lifecycle-session', 'delegate_task', {
     tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }],
     async_launched: false
@@ -349,22 +349,22 @@ test('Hermes lifecycle hooks release subagents and clear reservations without ou
   }), options), null);
   assert.deepEqual(readState('lifecycle-session', options.dataDir).delegation.reservations, {});
 
-  handleHermesHook(prompt('end-session', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- delegate'), options);
+  handleHermesHook(prompt('end-session', '$stop-that-shit change agents=1 -- delegate'), options);
   handleHermesHook(pre('end-session', 'delegate_task', { goal: 'inspect once' }), options);
   assert.equal(handleHermesHook(lifecycle('end-session', 'on_session_end'), options), null);
   assert.deepEqual(readState('end-session', options.dataDir).delegation.reservations, {});
 });
 
-test('Hermes delegation control actions do not consume agent budget', (t) => {
+test('Hermes delegation control actions do not reserve agent slots', (t) => {
   const { handleHermesHook } = adapter();
   const options = workspace(t);
-  handleHermesHook(prompt('delegate-control', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- manage delegation'), options);
+  handleHermesHook(prompt('delegate-control', '$stop-that-shit change agents=1 -- manage delegation'), options);
   for (const action of ['list', 'steer', 'stop']) {
     assert.equal(handleHermesHook(pre('delegate-control', 'delegate_task', { action }), options), null);
-    assert.equal(readState('delegate-control', options.dataDir).delegation.totalAgentsUsed, 0);
+    assert.deepEqual(readState('delegate-control', options.dataDir).delegation.reservations, {});
   }
   assert.equal(handleHermesHook(pre('delegate-control', 'delegate_task', { goal: 'inspect' }), options), null);
-  assert.equal(readState('delegate-control', options.dataDir).delegation.totalAgentsUsed, 1);
+  assert.equal(readState('delegate-control', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 1);
 });
 
 test('unknown hook events and empty payloads are not applicable', () => {

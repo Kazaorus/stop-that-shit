@@ -98,14 +98,15 @@ test('Claude Adapter maps lifecycle Hook fields to ControlEvent v1', () => {
   }
 });
 
-test('Claude prompt hooks keep legacy directives compatible with a deprecation warning', (t) => {
+test('Claude prompt hooks reject split directives and accept formal agents syntax', (t) => {
   const options = workspace(t);
   handleClaudeHook(prompt('invalid-directive', '$stop-that-shit change total-agents=4 -- bounded delegation'), options);
-  const output = handleClaudeHook(prompt('invalid-directive', '$stop-that-shit change agents=1 -- legacy syntax'), options);
-  assert.match(output.hookSpecificOutput.additionalContext, /deprecated/);
+  const output = handleClaudeHook(prompt('invalid-directive', '$stop-that-shit change agents=1 -- set concurrency'), options);
+  assert.match(output.hookSpecificOutput.additionalContext, /agents=0\/1/);
 
   const expansionOutput = handleClaudeHook(expansion('invalid-expansion', 'agents=1'), options);
-  assert.match(expansionOutput.hookSpecificOutput.additionalContext, /deprecated/);
+  assert.ok(expansionOutput);
+  assert.equal(readState('invalid-expansion', options.dataDir).contract.agentBudget, 1);
 
   assert.deepEqual(fromControlResult('UserPromptExpansion', {
     kind: 'prompt-error',
@@ -115,7 +116,7 @@ test('Claude prompt hooks keep legacy directives compatible with a deprecation w
 
 test('Claude lifecycle hooks update and clear delegation state', (t) => {
   const options = workspace(t);
-  handleClaudeHook(prompt('lifecycle', '$stop-that-shit change total-agents=4 concurrent-agents=4 -- delegate'), options);
+  handleClaudeHook(prompt('lifecycle', '$stop-that-shit change agents=4 -- delegate'), options);
   handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect', async_launched: false }), options);
 
   handleClaudeHook({
@@ -292,20 +293,20 @@ test('Monitor command sources reuse shell hash/dependency enforcement while WebS
   assert.equal(classifyClaudeTool('Monitor', { ws: { url: 'wss://example.test/events' } }), 'read');
 });
 
-test('Claude Agent uses the shared total and concurrent limits', (t) => {
+test('Claude Agent uses the shared active agent limit', (t) => {
   const options = workspace(t);
-  handleClaudeHook(prompt('agent-budget', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- use one specialist'), options);
+  handleClaudeHook(prompt('agent-budget', '$stop-that-shit change agents=1 -- use one specialist'), options);
   assert.equal(handleClaudeHook(pre('agent-budget', 'Agent', { prompt: 'inspect tests', async_launched: false }), options), null);
   const denied = handleClaudeHook(pre('agent-budget', 'Agent', { prompt: 'inspect docs', async_launched: false }, root, 'Agent-2'), options);
-  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /S\/(?:TOTAL_AGENT_LIMIT|CONCURRENT_AGENT_LIMIT)/);
+  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /S\/AGENT_BUDGET_EXHAUSTED/);
 });
 
 test('Claude Workflow cannot bypass configured limits with opaque internal fan-out', (t) => {
   const options = workspace(t);
-  handleClaudeHook(prompt('workflow-budget', '$stop-that-shit change total-agents=8 concurrent-agents=8 -- bounded delegation only'), options);
+  handleClaudeHook(prompt('workflow-budget', '$stop-that-shit change agents=8 -- bounded delegation only'), options);
   const denied = handleClaudeHook(pre('workflow-budget', 'Workflow', { workflow: 'parallel-review' }), options);
   assert.match(denied.hookSpecificOutput.permissionDecisionReason, /S\/UNBOUNDED_DELEGATION/);
-  assert.equal(readState('workflow-budget', options.dataDir).delegation.totalAgentsUsed, 0);
+  assert.deepEqual(readState('workflow-budget', options.dataDir).delegation.reservations, {});
 });
 
 test('newer Claude built-ins classify without weakening read-only and worktree boundaries', () => {
@@ -361,10 +362,10 @@ test('Claude tool classification covers native read, write, control, delegation,
   assert.equal(classifyClaudeTool('Bash', { command: 'node scripts/custom.js' }), 'unknown');
 });
 
-test('parallel Claude Agent hook processes cannot oversubscribe concurrent-agents=1', (t) => {
+test('parallel Claude Agent hook processes cannot oversubscribe agents=1', (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-claude-parallel-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
-  handleClaudeHook(prompt('parallel-agent', '$stop-that-shit change total-agents=1 concurrent-agents=1 -- one subagent'), { dataDir });
+  handleClaudeHook(prompt('parallel-agent', '$stop-that-shit change agents=1 -- one subagent'), { dataDir });
   const entrypoint = path.join(root, 'hooks', 'stop-that-shit-claude.cjs');
   const payloads = [
     JSON.stringify(pre('parallel-agent', 'Agent', { prompt: 'inspect', async_launched: false }, root, 'Agent-1')),
@@ -389,6 +390,6 @@ test('parallel Claude Agent hook processes cannot oversubscribe concurrent-agent
     const allowed = parsed.filter((value) => value === null);
     assert.equal(denied.length, 1);
     assert.equal(allowed.length, 1);
-    assert.equal(readState('parallel-agent', dataDir).delegation.totalAgentsUsed, 1);
+    assert.equal(Object.keys(readState('parallel-agent', dataDir).delegation.reservations).length, 1);
   });
 });

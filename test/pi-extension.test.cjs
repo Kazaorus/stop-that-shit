@@ -153,7 +153,7 @@ test('delegation reservation is released on tool_result', (t) => {
   const pi = fakePi();
   const ctx = fakeContext('delegation-session');
   registerPiExtension(pi, { dataDir });
-  pi.handlers.get('input')(input('$stop-that-shit change concurrent-agents=1 -- delegate'), ctx);
+  pi.handlers.get('input')(input('$stop-that-shit change agents=1 -- delegate'), ctx);
 
   const delegation = (toolCallId, task) => ({
     type: 'tool_call',
@@ -170,12 +170,12 @@ test('delegation reservation is released on tool_result', (t) => {
   assert.equal(pi.handlers.get('tool_call')(delegation('subagent-2', 'inspect again'), ctx), undefined);
 });
 
-test('Pi session shutdown clears active reservations without refunding total usage', (t) => {
+test('Pi session shutdown clears active reservations', (t) => {
   const dataDir = workspace(t);
   const pi = fakePi();
   const ctx = fakeContext('shutdown-session');
   registerPiExtension(pi, { dataDir });
-  pi.handlers.get('input')(input('$stop-that-shit change total-agents=2 concurrent-agents=1 -- delegate'), ctx);
+  pi.handlers.get('input')(input('$stop-that-shit change agents=1 -- delegate'), ctx);
   pi.handlers.get('tool_call')({
     type: 'tool_call', toolCallId: 'subagent-1', toolName: 'subagent',
     input: { agent: 'scout', task: 'inspect', async_launched: true }
@@ -183,7 +183,6 @@ test('Pi session shutdown clears active reservations without refunding total usa
   pi.handlers.get('session_shutdown')({ type: 'session_shutdown', reason: 'quit' }, ctx);
   const state = readState('shutdown-session', dataDir);
   assert.deepEqual(state.delegation.reservations, {});
-  assert.equal(state.delegation.totalAgentsUsed, 1);
 });
 
 test('Pi ignores tool_result events without toolCallId without reporting an adapter failure', (t) => {
@@ -191,7 +190,7 @@ test('Pi ignores tool_result events without toolCallId without reporting an adap
   const pi = fakePi();
   const ctx = fakeContext('malformed-result-session');
   registerPiExtension(pi, { dataDir });
-  pi.handlers.get('input')(input('$stop-that-shit change concurrent-agents=1 -- delegate'), ctx);
+  pi.handlers.get('input')(input('$stop-that-shit change agents=1 -- delegate'), ctx);
   pi.handlers.get('tool_call')({
     type: 'tool_call',
     toolCallId: 'subagent-1',

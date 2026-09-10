@@ -1,11 +1,5 @@
 'use strict';
 
-function totalAgentsUsed(state) {
-  return Number.isSafeInteger(state && state.totalAgentsUsed) && state.totalAgentsUsed >= 0
-    ? state.totalAgentsUsed
-    : 0;
-}
-
 function reservationsOf(state) {
   return state && state.reservations && typeof state.reservations === 'object'
     ? state.reservations
@@ -56,7 +50,6 @@ function reserveDelegation(state, reservationId, actionId, count) {
   if (normalizedActionId) accepted[normalizedActionId] = count;
   return {
     ...state,
-    totalAgentsUsed: totalAgentsUsed(state) + count,
     acceptedActions: accepted,
     reservations: {
       ...reservations,
@@ -85,6 +78,7 @@ function markReservationAsync(state, reservationId, asyncLaunched) {
 
 function bindSubagent(state, agentId, reservationId) {
   if (typeof agentId !== 'string' || !agentId) return state;
+  if (seenAgentIds(state).includes(agentId)) return state;
   const reservations = reservationsOf(state);
   const reservation = reservations[reservationId];
   if (stoppedAgentIds(state).includes(agentId)) {
@@ -95,9 +89,12 @@ function bindSubagent(state, agentId, reservationId) {
     } else {
       nextReservations[reservationId] = { ...reservation, pendingCount: reservation.pendingCount - 1 };
     }
-    return { ...state, reservations: nextReservations };
+    return {
+      ...state,
+      agentIdsSeen: [...new Set([...seenAgentIds(state), agentId])],
+      reservations: nextReservations
+    };
   }
-  if (seenAgentIds(state).includes(agentId)) return state;
   if (Object.values(reservations).some((reservation) => Array.isArray(reservation.agentIds) && reservation.agentIds.includes(agentId))) {
     return state;
   }

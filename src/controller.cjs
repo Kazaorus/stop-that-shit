@@ -46,19 +46,13 @@ function contractContext(contract, delegation = {}, phase = 'active', directiveW
     ].filter(Boolean).join(' ');
   }
 
-  const totalLimit = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
-    ? contract.totalAgentBudget
+  const agentLimit = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
+    ? contract.agentBudget
     : DEFAULT_AGENT_LIMIT;
-  const concurrentLimit = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
-    ? contract.concurrentAgentBudget
-    : DEFAULT_AGENT_LIMIT;
-  const totalUsed = Number.isSafeInteger(delegation.totalAgentsUsed) && delegation.totalAgentsUsed >= 0
-    ? delegation.totalAgentsUsed
-    : 0;
 
   return [
     directiveWarning && directiveWarning.message ? `Warning: ${directiveWarning.message}` : null,
-    `Stop That Shit (${phase}): mode=${contract.mode}; total=${totalUsed}/${totalLimit}; concurrent=${activeDelegationCount(delegation)}/${concurrentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
+    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${activeDelegationCount(delegation)}/${agentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
     'Stop Ladder: Is it requested? Is it necessary? What reachable evidence proves that? Would omission fail the current acceptance?',
     'Report real findings even when implementation is not authorized.',
     'Before expanding scope, name reachable evidence, failure if omitted, and the fact that changes the next action.',

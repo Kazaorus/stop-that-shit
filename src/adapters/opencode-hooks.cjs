@@ -70,8 +70,7 @@ function toActionAfterEvent(input, context = {}) {
   const actionId = optionalIdentifier(input && input.callID, input && input.callId);
   if (!actionId) return null;
   const action = { id: actionId };
-  const asyncLaunched = readAsyncLaunched(input, input && input.args)
-    ?? (input && input.tool === 'task' ? false : null);
+  const asyncLaunched = readAsyncLaunched(input, input && input.args);
   if (asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
   return {
     protocolVersion: PROTOCOL_VERSION,

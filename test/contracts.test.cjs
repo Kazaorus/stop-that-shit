@@ -52,26 +52,24 @@ test('an explicit empty files value creates an empty file boundary', () => {
 
 test('agent limits default to the maximum safe integer', () => {
   const contract = defaultContract();
-  assert.equal(contract.totalAgentBudget, Number.MAX_SAFE_INTEGER);
-  assert.equal(contract.concurrentAgentBudget, Number.MAX_SAFE_INTEGER);
-  assert.equal('agentBudget' in contract, false);
+  assert.equal(contract.agentBudget, Number.MAX_SAFE_INTEGER);
+  assert.equal('totalAgentBudget' in contract, false);
+  assert.equal('concurrentAgentBudget' in contract, false);
   assert.equal('agentsUsed' in contract, false);
 });
 
-test('total and concurrent agent limits are parsed independently', () => {
-  const result = parseContractPrompt('$stop-that-shit lock change total-agents=3 concurrent-agents=2 -- implement it');
+test('agents is the formal active concurrency limit', () => {
+  const result = parseContractPrompt('$stop-that-shit lock change agents=3 -- implement it');
   assert.equal(result.contract.mode, 'change');
   assert.equal(result.contract.level, 'lock');
-  assert.equal(result.contract.totalAgentBudget, 3);
-  assert.equal(result.contract.concurrentAgentBudget, 2);
+  assert.equal(result.contract.agentBudget, 3);
   assert.equal(result.error, null);
   assert.equal(result.warning, null);
 });
 
-test('zero is accepted for both agent limits', () => {
-  const result = parseContractPrompt('$stop-that-shit change total-agents=0 concurrent-agents=0 -- implement it');
-  assert.equal(result.contract.totalAgentBudget, 0);
-  assert.equal(result.contract.concurrentAgentBudget, 0);
+test('zero is accepted and disables delegation', () => {
+  const result = parseContractPrompt('$stop-that-shit change agents=0 -- implement it');
+  assert.equal(result.contract.agentBudget, 0);
   assert.equal(result.error, null);
 });
 
@@ -80,10 +78,9 @@ test('invalid agent limits return a structured error without changing the contra
     ...defaultContract(),
     mode: 'change',
     level: 'guard',
-    totalAgentBudget: 4,
-    concurrentAgentBudget: 3
+    agentBudget: 4
   };
-  for (const token of ['total-agents=-1', 'total-agents=1.5', 'concurrent-agents=NaN', `concurrent-agents=${Number.MAX_SAFE_INTEGER + 1}`]) {
+  for (const token of ['agents=-1', 'agents=1.5', 'agents=NaN', `agents=${Number.MAX_SAFE_INTEGER + 1}`]) {
     const result = parseContractPrompt(`$stop-that-shit change ${token} -- implement it`, previous);
     assert.equal(result.error.code, 'INVALID_AGENT_LIMIT');
     assert.equal(result.error.token, token);
@@ -92,42 +89,26 @@ test('invalid agent limits return a structured error without changing the contra
   }
 });
 
-test('legacy agents directive maps to total with a deprecation warning', () => {
-  const result = parseContractPrompt('$stop-that-shit change agents=9 -- implement it');
-  assert.equal(result.contract.totalAgentBudget, 9);
-  assert.equal(result.contract.concurrentAgentBudget, Number.MAX_SAFE_INTEGER);
-  assert.equal(result.error, null);
-  assert.equal(result.warning.code, 'DEPRECATED_AGENT_DIRECTIVE');
-  assert.equal(result.warning.token, 'agents=9');
-  assert.equal(result.changed, true);
-});
-
-test('conflicting legacy and canonical total limits reject without partial updates', () => {
+test('split agent directives are rejected without partial updates', () => {
   const previous = {
     ...defaultContract(),
     mode: 'review',
     level: 'guard',
-    totalAgentBudget: 4,
-    concurrentAgentBudget: 3
+    agentBudget: 4
   };
-  const result = parseContractPrompt('$stop-that-shit change total-agents=9 agents=1 -- implement it', previous);
-  assert.equal(result.error.code, 'CONFLICTING_AGENT_LIMITS');
-  assert.equal(result.error.token, 'agents=1');
-  assert.equal(result.changed, false);
-  assert.deepEqual(result.contract, previous);
-});
-
-test('matching legacy and canonical total limits are accepted with a warning', () => {
-  const result = parseContractPrompt('$stop-that-shit change total-agents=9 agents=9 -- implement it');
-  assert.equal(result.contract.totalAgentBudget, 9);
-  assert.equal(result.error, null);
-  assert.equal(result.warning.code, 'DEPRECATED_AGENT_DIRECTIVE');
+  for (const token of ['total-agents=9', 'concurrent-agents=2']) {
+    const result = parseContractPrompt(`$stop-that-shit change ${token} agents=1 -- implement it`, previous);
+    assert.equal(result.error.code, 'UNSUPPORTED_AGENT_DIRECTIVE');
+    assert.equal(result.error.token, token);
+    assert.equal(result.changed, false);
+    assert.deepEqual(result.contract, previous);
+  }
 });
 
 test('a long path does not truncate a later agent limit', () => {
   const longPath = `src/${'nested/'.repeat(20)}file.cjs`;
-  const result = parseContractPrompt(`$stop-that-shit change files=${longPath} total-agents=7 -- implement it`);
-  assert.equal(result.contract.totalAgentBudget, 7);
+  const result = parseContractPrompt(`$stop-that-shit change files=${longPath} agents=7 -- implement it`);
+  assert.equal(result.contract.agentBudget, 7);
   assert.deepEqual(result.contract.allowedPaths, [longPath]);
 });
 

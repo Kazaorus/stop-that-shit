@@ -76,29 +76,19 @@ test('file boundary requires approval when an unknown action omits affected path
   assert.equal(actual.reasonCode, 'WRITE_PATH_UNPROVEN');
 });
 
-test('delegation limits check complete batch count against total and active usage', () => {
+test('delegation limit checks the complete batch against active usage', () => {
   const allowed = decide({
-    contract: { mode: 'change', level: 'guard', totalAgentBudget: 3, concurrentAgentBudget: 3 },
-    state: { delegation: { totalAgentsUsed: 1, reservations: {} } },
+    contract: { mode: 'change', level: 'guard', agentBudget: 3 },
+    state: { delegation: { reservations: {} } },
     action: { mutability: 'delegate', delegationCount: 2 }
   });
-  const totalDenied = decide({
-    contract: { mode: 'change', level: 'guard', totalAgentBudget: 2, concurrentAgentBudget: 4 },
-    state: { delegation: { totalAgentsUsed: 1, reservations: {} } },
-    action: { mutability: 'delegate', delegationCount: 2 }
-  });
-  const concurrentDenied = decide({
-    contract: { mode: 'change', level: 'guard', totalAgentBudget: 4, concurrentAgentBudget: 2 },
-    state: {
-      delegation: {
-        totalAgentsUsed: 1,
-        reservations: { 'reservation-1': { pendingCount: 1, agentIds: [] } }
-      }
-    },
+  const activeDenied = decide({
+    contract: { mode: 'change', level: 'guard', agentBudget: 2 },
+    state: { delegation: { reservations: { 'reservation-1': { pendingCount: 1, agentIds: [] } } } },
     action: { mutability: 'delegate', delegationCount: 2 }
   });
   const zeroDenied = decide({
-    contract: { mode: 'change', level: 'guard', totalAgentBudget: 0, concurrentAgentBudget: 0 },
+    contract: { mode: 'change', level: 'guard', agentBudget: 0 },
     action: { mutability: 'delegate', delegationCount: 1 }
   });
   const defaultLimit = decide({
@@ -107,16 +97,28 @@ test('delegation limits check complete batch count against total and active usag
   });
 
   assert.equal(allowed.outcome, 'allow');
-  assert.equal(totalDenied.reasonCode, 'TOTAL_AGENT_LIMIT');
-  assert.match(totalDenied.explanation, /requires 2/);
-  assert.equal(concurrentDenied.reasonCode, 'CONCURRENT_AGENT_LIMIT');
-  assert.equal(zeroDenied.reasonCode, 'TOTAL_AGENT_LIMIT');
+  assert.equal(activeDenied.reasonCode, 'AGENT_BUDGET_EXHAUSTED');
+  assert.match(activeDenied.explanation, /requires 2/);
+  assert.equal(zeroDenied.reasonCode, 'AGENT_BUDGET_EXHAUSTED');
   assert.equal(defaultLimit.outcome, 'allow');
+});
+
+test('active delegation count includes pending batch units', () => {
+  const actual = decide({
+    contract: { mode: 'change', level: 'guard', agentBudget: 4 },
+    state: {
+      delegation: {
+        reservations: { 'reservation-1': { pendingCount: 1, agentIds: [] } }
+      }
+    },
+    action: { mutability: 'delegate', delegationCount: 2 }
+  });
+  assert.equal(actual.outcome, 'allow');
 });
 
 test('invalid directives block delegation before budget checks', () => {
   const actual = decide({
-    contract: { mode: 'change', level: 'guard', totalAgentBudget: 4, concurrentAgentBudget: 4 },
+    contract: { mode: 'change', level: 'guard', agentBudget: 4 },
     state: { directiveError: { code: 'INVALID_AGENT_LIMIT' } },
     action: { mutability: 'delegate', delegationCount: 1 }
   });
@@ -125,7 +127,7 @@ test('invalid directives block delegation before budget checks', () => {
 
 test('unbounded delegation takes precedence over a finite requested count', () => {
   const actual = decide({
-    contract: { mode: 'change', level: 'guard', totalAgentBudget: 1, concurrentAgentBudget: 1 },
+    contract: { mode: 'change', level: 'guard', agentBudget: 1 },
     action: { mutability: 'delegate', delegationCount: 1, unboundedDelegation: true }
   });
   assert.equal(actual.reasonCode, 'UNBOUNDED_DELEGATION');

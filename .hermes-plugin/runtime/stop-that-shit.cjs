@@ -249,19 +249,13 @@ function contractContext(contract, delegation = {}, phase = 'active', directiveW
     ].filter(Boolean).join(' ');
   }
 
-  const totalLimit = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
-    ? contract.totalAgentBudget
+  const agentLimit = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
+    ? contract.agentBudget
     : DEFAULT_AGENT_LIMIT;
-  const concurrentLimit = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
-    ? contract.concurrentAgentBudget
-    : DEFAULT_AGENT_LIMIT;
-  const totalUsed = Number.isSafeInteger(delegation.totalAgentsUsed) && delegation.totalAgentsUsed >= 0
-    ? delegation.totalAgentsUsed
-    : 0;
 
   return [
     directiveWarning && directiveWarning.message ? `Warning: ${directiveWarning.message}` : null,
-    `Stop That Shit (${phase}): mode=${contract.mode}; total=${totalUsed}/${totalLimit}; concurrent=${activeDelegationCount(delegation)}/${concurrentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
+    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${activeDelegationCount(delegation)}/${agentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
     'Stop Ladder: Is it requested? Is it necessary? What reachable evidence proves that? Would omission fail the current acceptance?',
     'Report real findings even when implementation is not authorized.',
     'Before expanding scope, name reachable evidence, failure if omitted, and the fact that changes the next action.',
@@ -531,8 +525,7 @@ function defaultContract() {
   return {
     mode: 'unconfirmed',
     level: 'watch',
-    totalAgentBudget: DEFAULT_AGENT_LIMIT,
-    concurrentAgentBudget: DEFAULT_AGENT_LIMIT,
+    agentBudget: DEFAULT_AGENT_LIMIT,
     hashPolicy: 'deny',
     allowedPaths: null,
     dependencyPolicy: 'ask',
@@ -555,56 +548,36 @@ function parseDirective(prompt) {
   const head = directiveHead(prompt, mention.index + mention[0].length);
   const tokens = head.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean);
   const parsed = { mentioned: true, error: null, warning: null };
-  let legacyAgentLimit = null;
-  let legacyAgentToken = null;
-  let canonicalAgentLimit = null;
 
   for (const rawToken of tokens) {
     const token = rawToken.toLowerCase();
     if (MODES.has(token)) parsed.mode = token;
     if (LEVELS.has(token)) parsed.level = token;
-    const legacyAgents = /^agents=(.*)$/i.exec(rawToken);
-    if (legacyAgents) {
-      const value = parseAgentLimit(legacyAgents[1]);
+    const agents = /^agents=(.*)$/i.exec(rawToken);
+    if (agents) {
+      const value = parseAgentLimit(agents[1]);
       if (value === null) {
         parsed.error = invalidAgentLimit(rawToken);
         break;
       }
-      legacyAgentLimit = value;
-      legacyAgentToken = rawToken;
-      parsed.warning = {
-        code: 'DEPRECATED_AGENT_DIRECTIVE',
-        token: rawToken,
-        message: 'The agents=N directive is deprecated; use total-agents=N.'
-      };
+      parsed.agentBudget = value;
       continue;
     }
     if (/^agents$/i.test(rawToken)) {
       parsed.error = {
-        code: 'LEGACY_AGENT_DIRECTIVE',
+        code: 'INVALID_AGENT_LIMIT',
         token: rawToken,
-        message: 'The agents directive requires a numeric value; use total-agents=N.'
+        message: `${rawToken} must be a non-negative safe integer.`
       };
       break;
     }
-    const totalAgents = /^total-agents=(.*)$/i.exec(rawToken);
-    if (totalAgents) {
-      const value = parseAgentLimit(totalAgents[1]);
-      if (value === null) {
-        parsed.error = invalidAgentLimit(rawToken);
-        break;
-      }
-      canonicalAgentLimit = value;
-      parsed.totalAgentBudget = value;
-    }
-    const concurrentAgents = /^concurrent-agents=(.*)$/i.exec(rawToken);
-    if (concurrentAgents) {
-      const value = parseAgentLimit(concurrentAgents[1]);
-      if (value === null) {
-        parsed.error = invalidAgentLimit(rawToken);
-        break;
-      }
-      parsed.concurrentAgentBudget = value;
+    if (/^(?:total-agents|concurrent-agents)(?:=|$)/i.test(rawToken)) {
+      parsed.error = {
+        code: 'UNSUPPORTED_AGENT_DIRECTIVE',
+        token: rawToken,
+        message: 'Use agents=N to set the maximum number of concurrently active subagents.'
+      };
+      break;
     }
     const hash = /^hash=(deny|ask|allow)$/.exec(token);
     if (hash && HASH_POLICIES.has(hash[1])) parsed.hashPolicy = hash[1];
@@ -612,17 +585,6 @@ function parseDirective(prompt) {
     if (files) parsed.allowedPaths = files[1].split('|').map((value) => value.replace(/\\/g, '/')).filter(Boolean);
     const dependencies = /^deps=(deny|ask|allow)$/.exec(token);
     if (dependencies && SCOPE_POLICIES.has(dependencies[1])) parsed.dependencyPolicy = dependencies[1];
-  }
-
-  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit !== null && legacyAgentLimit !== canonicalAgentLimit) {
-    parsed.error = {
-      code: 'CONFLICTING_AGENT_LIMITS',
-      token: legacyAgentToken,
-      message: `${legacyAgentToken} conflicts with total-agents=${canonicalAgentLimit}.`
-    };
-  }
-  if (!parsed.error && legacyAgentLimit !== null && canonicalAgentLimit === null) {
-    parsed.totalAgentBudget = legacyAgentLimit;
   }
 
   return parsed;
@@ -667,18 +629,30 @@ function naturalCorrection(prompt, previous) {
   return null;
 }
 
-function parseContractPrompt(prompt, previousContract = defaultContract()) {
+function validAgentBudget(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function normalizeContract(previousContract) {
   const supplied = previousContract && typeof previousContract === 'object' ? previousContract : {};
   const previous = { ...defaultContract(), ...supplied };
-  if (
-    !Object.prototype.hasOwnProperty.call(supplied, 'totalAgentBudget')
-    && Number.isSafeInteger(supplied.agentBudget)
-    && supplied.agentBudget >= 0
-  ) {
-    previous.totalAgentBudget = supplied.agentBudget;
-  }
-  delete previous.agentBudget;
+  const suppliedAgentBudget = validAgentBudget(supplied.agentBudget);
+  const concurrentAgentBudget = validAgentBudget(supplied.concurrentAgentBudget);
+  const totalAgentBudget = validAgentBudget(supplied.totalAgentBudget);
+  previous.agentBudget = suppliedAgentBudget
+    ?? (concurrentAgentBudget !== null && concurrentAgentBudget !== DEFAULT_AGENT_LIMIT
+      ? concurrentAgentBudget
+      : totalAgentBudget !== null && totalAgentBudget !== DEFAULT_AGENT_LIMIT
+        ? totalAgentBudget
+        : DEFAULT_AGENT_LIMIT);
+  delete previous.totalAgentBudget;
+  delete previous.concurrentAgentBudget;
   delete previous.agentsUsed;
+  return previous;
+}
+
+function parseContractPrompt(prompt, previousContract = defaultContract()) {
+  const previous = normalizeContract(previousContract);
   const directive = parseDirective(String(prompt || ''));
   const correction = naturalCorrection(String(prompt || ''), previous);
   const next = { ...previous };
@@ -703,12 +677,8 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
       next.level = directive.level;
       changed = true;
     }
-    if (Number.isInteger(directive.totalAgentBudget) && directive.totalAgentBudget !== next.totalAgentBudget) {
-      next.totalAgentBudget = directive.totalAgentBudget;
-      changed = true;
-    }
-    if (Number.isInteger(directive.concurrentAgentBudget) && directive.concurrentAgentBudget !== next.concurrentAgentBudget) {
-      next.concurrentAgentBudget = directive.concurrentAgentBudget;
+    if (Number.isInteger(directive.agentBudget) && directive.agentBudget !== next.agentBudget) {
+      next.agentBudget = directive.agentBudget;
       changed = true;
     }
     if (directive.hashPolicy && directive.hashPolicy !== next.hashPolicy) {
@@ -771,12 +741,6 @@ module.exports = {
 "src/delegation-state.cjs": function(module, exports, __require) {
 'use strict';
 
-function totalAgentsUsed(state) {
-  return Number.isSafeInteger(state && state.totalAgentsUsed) && state.totalAgentsUsed >= 0
-    ? state.totalAgentsUsed
-    : 0;
-}
-
 function reservationsOf(state) {
   return state && state.reservations && typeof state.reservations === 'object'
     ? state.reservations
@@ -827,7 +791,6 @@ function reserveDelegation(state, reservationId, actionId, count) {
   if (normalizedActionId) accepted[normalizedActionId] = count;
   return {
     ...state,
-    totalAgentsUsed: totalAgentsUsed(state) + count,
     acceptedActions: accepted,
     reservations: {
       ...reservations,
@@ -856,6 +819,7 @@ function markReservationAsync(state, reservationId, asyncLaunched) {
 
 function bindSubagent(state, agentId, reservationId) {
   if (typeof agentId !== 'string' || !agentId) return state;
+  if (seenAgentIds(state).includes(agentId)) return state;
   const reservations = reservationsOf(state);
   const reservation = reservations[reservationId];
   if (stoppedAgentIds(state).includes(agentId)) {
@@ -866,9 +830,12 @@ function bindSubagent(state, agentId, reservationId) {
     } else {
       nextReservations[reservationId] = { ...reservation, pendingCount: reservation.pendingCount - 1 };
     }
-    return { ...state, reservations: nextReservations };
+    return {
+      ...state,
+      agentIdsSeen: [...new Set([...seenAgentIds(state), agentId])],
+      reservations: nextReservations
+    };
   }
-  if (seenAgentIds(state).includes(agentId)) return state;
   if (Object.values(reservations).some((reservation) => Array.isArray(reservation.agentIds) && reservation.agentIds.includes(agentId))) {
     return state;
   }
@@ -1003,7 +970,7 @@ function decide({ contract, action, state = {} }) {
       'S',
       'INVALID_DIRECTIVE',
       `The active Stop That Shit directive is invalid: ${state.directiveError.message || state.directiveError.code || 'unknown directive error'}.`,
-      'Submit a corrected total-agents=N and/or concurrent-agents=N directive before delegating.'
+      'Submit a corrected agents=N directive before delegating.'
     );
   }
 
@@ -1107,32 +1074,17 @@ function decide({ contract, action, state = {} }) {
     );
   }
 
-  const totalAgentBudget = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
-    ? contract.totalAgentBudget
+  const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
+    ? contract.agentBudget
     : DEFAULT_AGENT_LIMIT;
-  const concurrentAgentBudget = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
-    ? contract.concurrentAgentBudget
-    : DEFAULT_AGENT_LIMIT;
-  const totalAgentsUsed = state.delegation && Number.isSafeInteger(state.delegation.totalAgentsUsed)
-    ? state.delegation.totalAgentsUsed
-    : 0;
   const activeAgents = activeDelegationCount(state.delegation);
-  if (action.mutability === 'delegate' && !action.alreadyReserved && totalAgentsUsed + delegationCount > totalAgentBudget) {
+  if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > agentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
-      'TOTAL_AGENT_LIMIT',
-      `The session total allows ${totalAgentBudget} subagent(s), with ${totalAgentsUsed} already used, and this action requires ${delegationCount}.`,
-      'Continue locally or increase total-agents=N in a corrected directive.'
-    );
-  }
-  if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > concurrentAgentBudget) {
-    return decision(
-      controlledOutcome(level),
-      'S',
-      'CONCURRENT_AGENT_LIMIT',
-      `The session allows ${concurrentAgentBudget} active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
-      'Wait for the current delegation to complete or increase concurrent-agents=N in a corrected directive.'
+      'AGENT_BUDGET_EXHAUSTED',
+      `The session allows ${agentBudget} concurrently active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
+      'Wait for the current delegation to complete or increase agents=N in a corrected directive.'
     );
   }
 
@@ -1204,9 +1156,7 @@ function recordDecision(facts, options = {}) {
     contract: {
       mode: String(contract.mode || 'unconfirmed'),
       level: String(contract.level || 'watch'),
-      totalAgentBudget: Number.isSafeInteger(contract.totalAgentBudget) ? contract.totalAgentBudget : Number.MAX_SAFE_INTEGER,
-      concurrentAgentBudget: Number.isSafeInteger(contract.concurrentAgentBudget) ? contract.concurrentAgentBudget : Number.MAX_SAFE_INTEGER,
-      totalAgentsUsed: Number.isSafeInteger(delegation.totalAgentsUsed) ? delegation.totalAgentsUsed : 0,
+      agentBudget: Number.isSafeInteger(contract.agentBudget) ? contract.agentBudget : Number.MAX_SAFE_INTEGER,
       activeAgents: activeDelegationCount(delegation),
       hashPolicy: String(contract.hashPolicy || 'deny'),
       dependencyPolicy: String(contract.dependencyPolicy || 'ask'),
@@ -1458,6 +1408,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { defaultContract } = __require("src/contracts.cjs");
 
+const CURRENT_SCHEMA_VERSION = 3;
+
 function dataRoot(override) {
   return override || process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA || path.join(os.tmpdir(), 'stop-that-shit-dev');
 }
@@ -1472,10 +1424,9 @@ function statePath(sessionId, override) {
 
 function freshState() {
   return {
-    schemaVersion: 2,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     contract: defaultContract(),
     delegation: {
-      totalAgentsUsed: 0,
       reservations: {},
       agentIdsSeen: [],
       stoppedAgentIds: [],
@@ -1491,7 +1442,24 @@ function safeCount(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function normalizeDelegation(value, legacyUsed) {
+function validAgentBudget(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function migratedAgentBudget(contract) {
+  const legacyBudget = validAgentBudget(contract.agentBudget);
+  if (legacyBudget !== null) return legacyBudget;
+
+  const concurrentBudget = validAgentBudget(contract.concurrentAgentBudget);
+  if (concurrentBudget !== null && concurrentBudget !== Number.MAX_SAFE_INTEGER) return concurrentBudget;
+
+  const totalBudget = validAgentBudget(contract.totalAgentBudget);
+  if (totalBudget !== null && totalBudget !== Number.MAX_SAFE_INTEGER) return totalBudget;
+
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function normalizeDelegation(value) {
   const source = value && typeof value === 'object' ? value : {};
   const reservations = {};
   if (source.reservations && typeof source.reservations === 'object') {
@@ -1516,9 +1484,7 @@ function normalizeDelegation(value, legacyUsed) {
     if (!reservation.actionId || Object.prototype.hasOwnProperty.call(acceptedActions, reservation.actionId)) continue;
     acceptedActions[reservation.actionId] = reservation.pendingCount + reservation.agentIds.length;
   }
-  const hasNewTotal = Number.isSafeInteger(source.totalAgentsUsed) && source.totalAgentsUsed >= 0;
   return {
-    totalAgentsUsed: hasNewTotal ? source.totalAgentsUsed : safeCount(legacyUsed),
     reservations,
     agentIdsSeen: Array.isArray(source.agentIdsSeen)
       ? [...new Set(source.agentIdsSeen.filter((agentId) => typeof agentId === 'string' && agentId))]
@@ -1532,29 +1498,48 @@ function normalizeDelegation(value, legacyUsed) {
 
 function normalizeState(parsed) {
   const fresh = freshState();
-  const legacyContract = parsed.contract && typeof parsed.contract === 'object' ? parsed.contract : {};
+  const source = parsed && typeof parsed === 'object' ? parsed : {};
+  const legacyContract = source.contract && typeof source.contract === 'object' ? source.contract : {};
   const contract = { ...fresh.contract, ...legacyContract };
-  const legacyBudget = Number.isSafeInteger(legacyContract.agentBudget) && legacyContract.agentBudget >= 0
-    ? legacyContract.agentBudget
-    : null;
-  if (!Object.prototype.hasOwnProperty.call(legacyContract, 'totalAgentBudget') && legacyBudget !== null) {
-    contract.totalAgentBudget = legacyBudget;
-  }
   delete contract.agentBudget;
+  contract.agentBudget = migratedAgentBudget(legacyContract);
+  delete contract.totalAgentBudget;
+  delete contract.concurrentAgentBudget;
   delete contract.agentsUsed;
-  if (!Number.isSafeInteger(contract.totalAgentBudget) || contract.totalAgentBudget < 0) {
-    contract.totalAgentBudget = fresh.contract.totalAgentBudget;
-  }
-  if (!Number.isSafeInteger(contract.concurrentAgentBudget) || contract.concurrentAgentBudget < 0) {
-    contract.concurrentAgentBudget = fresh.contract.concurrentAgentBudget;
-  }
+  delete contract.directiveWarning;
+  delete contract.directiveError;
+  const delegation = normalizeDelegation(source.delegation);
+  const directiveWarning = source.directiveWarning && typeof source.directiveWarning === 'object'
+    && source.directiveWarning.code !== 'DEPRECATED_AGENT_DIRECTIVE'
+    ? source.directiveWarning
+    : null;
+  const directiveError = source.directiveError && typeof source.directiveError === 'object'
+    && source.directiveError.code !== 'LEGACY_AGENT_DIRECTIVE'
+    ? source.directiveError
+    : null;
+  const hasCurrentContract = Object.prototype.hasOwnProperty.call(legacyContract, 'agentBudget')
+    && !Object.prototype.hasOwnProperty.call(legacyContract, 'totalAgentBudget')
+    && !Object.prototype.hasOwnProperty.call(legacyContract, 'concurrentAgentBudget')
+    && !Object.prototype.hasOwnProperty.call(legacyContract, 'agentsUsed');
+  const hasCurrentDelegation = source.delegation
+    && typeof source.delegation === 'object'
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'reservations')
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'agentIdsSeen')
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'stoppedAgentIds')
+    && Object.prototype.hasOwnProperty.call(source.delegation, 'acceptedActions')
+    && !Object.prototype.hasOwnProperty.call(source.delegation, 'totalAgentsUsed');
+  const migrated = source.schemaVersion !== CURRENT_SCHEMA_VERSION
+    || !hasCurrentContract
+    || !hasCurrentDelegation
+    || directiveWarning === null && source.directiveWarning !== null
+    || directiveError === null && source.directiveError !== null;
   return {
-    schemaVersion: 2,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     contract,
-    delegation: normalizeDelegation(parsed.delegation, legacyContract.agentsUsed),
-    directiveWarning: parsed.directiveWarning && typeof parsed.directiveWarning === 'object' ? parsed.directiveWarning : null,
-    directiveError: parsed.directiveError && typeof parsed.directiveError === 'object' ? parsed.directiveError : null,
-    lastPromptContext: parsed.lastPromptContext ?? null
+    delegation,
+    directiveWarning,
+    directiveError,
+    lastPromptContext: migrated ? null : source.lastPromptContext ?? null
   };
 }
 
@@ -1563,20 +1548,27 @@ function readState(sessionId, override) {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
     const normalized = normalizeState(parsed);
-    const hasDelegation = Object.prototype.hasOwnProperty.call(parsed, 'delegation');
-    const hasDirectiveWarning = Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning');
-    const hasDirectiveError = Object.prototype.hasOwnProperty.call(parsed, 'directiveError');
-    const hasPromptContext = Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext');
-    const hasAgentIdsSeen = parsed.delegation
-      && typeof parsed.delegation === 'object'
-      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen');
-    const hasStoppedAgentIds = parsed.delegation
-      && typeof parsed.delegation === 'object'
-      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds');
-    const hasAcceptedActions = parsed.delegation
-      && typeof parsed.delegation === 'object'
-      && Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions');
-    if (parsed.schemaVersion !== 2 || !hasDelegation || !hasDirectiveWarning || !hasDirectiveError || !hasPromptContext || !hasAgentIdsSeen || !hasStoppedAgentIds || !hasAcceptedActions) {
+    if (!parsed || typeof parsed !== 'object'
+      || parsed.schemaVersion !== CURRENT_SCHEMA_VERSION
+      || !parsed.contract || typeof parsed.contract !== 'object'
+      || !Object.prototype.hasOwnProperty.call(parsed.contract, 'agentBudget')
+      || !validAgentBudget(parsed.contract.agentBudget)
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'totalAgentBudget')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'concurrentAgentBudget')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'agentsUsed')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveWarning')
+      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveError')
+      || !parsed.delegation || typeof parsed.delegation !== 'object'
+      || Object.prototype.hasOwnProperty.call(parsed.delegation, 'totalAgentsUsed')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'reservations')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds')
+      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions')
+      || parsed.directiveWarning?.code === 'DEPRECATED_AGENT_DIRECTIVE'
+      || parsed.directiveError?.code === 'LEGACY_AGENT_DIRECTIVE'
+      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning')
+      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveError')
+      || !Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext')) {
       writeState(sessionId, normalized, override);
     }
     return normalized;

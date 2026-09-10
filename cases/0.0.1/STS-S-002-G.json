@@ -4,7 +4,7 @@
   "family": "S",
   "title": "One explicitly budgeted subagent",
   "input": {
-    "contract": { "mode": "change", "level": "guard", "totalAgentBudget": 1, "concurrentAgentBudget": 1 },
+    "contract": { "mode": "change", "level": "guard", "agentBudget": 1 },
     "action": { "mutability": "delegate", "duplicate": false }
   },
   "expected": { "outcome": "allow", "family": null, "reasonCode": "WITHIN_CONTRACT" }

@@ -30,14 +30,13 @@ Pi Extension          ----> Pi Adapter -----------/  decision(contract, action)
 - `.hermes-plugin/__init__.py` is the only Hermes host entrypoint and bridges
   native Plugin callbacks to the bundled runtime.
 - `pi/stop-that-shit.ts` is the Pi package entrypoint.
-- `src/state.cjs` stores schema-2 per-session contract state and serializes the
-  delegation ledger so concurrent Hook processes cannot oversubscribe either
+- `src/state.cjs` stores schema-3 per-session contract state and serializes the
+  delegation ledger so concurrent Hook processes cannot oversubscribe the active
   agent limit.
-- `src/delegation-state.cjs` owns pure reservation transitions. Total usage is
-  consumed by `action.before`; only an explicitly synchronous `action.after`
-  releases its active units. Background or unknown-status work remains reserved
-  until `subagent.stop` or `session.end`; session end clears activity but never
-  refunds total usage. The ledger also keeps accepted action IDs and session-local
+- `src/delegation-state.cjs` owns pure reservation transitions. `action.before`
+  reserves active units; only an explicitly synchronous `action.after` releases
+  them. Background or unknown-status work remains reserved until `subagent.stop`
+  or `session.end`. The ledger also keeps accepted action IDs and session-local
   agent stop/start metadata so retries, delayed duplicate starts, and stop-before-
   start events cannot charge or bind a later reservation; this metadata is not
   active usage or runtime audit data.
@@ -73,13 +72,13 @@ memory, cron, Skill management, message sending, and all other unlisted
 built-in/plugin/MCP tools remain `unknown`; an armed contract blocks unknown
 mutability rather than guessing.
 
-A Hermes `delegate_task` call reserves the total and concurrent limits by the
-number of child agents it can start: one for a non-empty `goal`, or
-`tasks.length` for a batch. The complete count is checked and reserved
-atomically before the tool runs; an insufficient limit rejects the whole batch
-without consuming any units. A confirmed synchronous completion releases active
-units; background or unknown-status calls remain reserved until an explicit
-subagent stop or session end, and never refund the cumulative total.
+A Hermes `delegate_task` call reserves active agent slots by the number of child
+agents it can start: one for a non-empty `goal`, or `tasks.length` for a batch.
+The complete count is checked and reserved atomically before the tool runs; an
+insufficient limit rejects the whole batch without consuming any units. A
+confirmed synchronous completion releases active units; background or
+unknown-status calls remain reserved until an explicit subagent stop or session
+end.
 `action=list`, `action=steer`, and `action=stop` are control operations and
 consume zero budget units.
 
@@ -122,7 +121,7 @@ Hard decisions are limited to observable facts:
 - writes in a confirmed non-mutating mode;
 - writes outside an optional explicit `files=` list;
 - covered dependency additions without authority;
-- subagent launches beyond `total-agents=N` or `concurrent-agents=N`;
+- subagent launches beyond the active `agents=N` limit;
 - high-confidence hashing without `hash=allow`.
 
 Every observing or armed check is recorded even when the policy allows it, so

@@ -71,8 +71,7 @@ function toActionAfterEvent(input, context = {}) {
   const actionId = optionalIdentifier(input && input.toolCallId, input && input.tool_call_id);
   if (!actionId) return null;
   const action = { id: actionId };
-  const asyncLaunched = readAsyncLaunched(input)
-    ?? (input && input.toolName === 'subagent' ? false : null);
+  const asyncLaunched = readAsyncLaunched(input);
   if (asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
   return {
     protocolVersion: PROTOCOL_VERSION,

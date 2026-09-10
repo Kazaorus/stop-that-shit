@@ -57,7 +57,7 @@ function decide({ contract, action, state = {} }) {
       'S',
       'INVALID_DIRECTIVE',
       `The active Stop That Shit directive is invalid: ${state.directiveError.message || state.directiveError.code || 'unknown directive error'}.`,
-      'Submit a corrected total-agents=N and/or concurrent-agents=N directive before delegating.'
+      'Submit a corrected agents=N directive before delegating.'
     );
   }
 
@@ -161,32 +161,17 @@ function decide({ contract, action, state = {} }) {
     );
   }
 
-  const totalAgentBudget = Number.isSafeInteger(contract.totalAgentBudget) && contract.totalAgentBudget >= 0
-    ? contract.totalAgentBudget
+  const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
+    ? contract.agentBudget
     : DEFAULT_AGENT_LIMIT;
-  const concurrentAgentBudget = Number.isSafeInteger(contract.concurrentAgentBudget) && contract.concurrentAgentBudget >= 0
-    ? contract.concurrentAgentBudget
-    : DEFAULT_AGENT_LIMIT;
-  const totalAgentsUsed = state.delegation && Number.isSafeInteger(state.delegation.totalAgentsUsed)
-    ? state.delegation.totalAgentsUsed
-    : 0;
   const activeAgents = activeDelegationCount(state.delegation);
-  if (action.mutability === 'delegate' && !action.alreadyReserved && totalAgentsUsed + delegationCount > totalAgentBudget) {
+  if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > agentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
-      'TOTAL_AGENT_LIMIT',
-      `The session total allows ${totalAgentBudget} subagent(s), with ${totalAgentsUsed} already used, and this action requires ${delegationCount}.`,
-      'Continue locally or increase total-agents=N in a corrected directive.'
-    );
-  }
-  if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > concurrentAgentBudget) {
-    return decision(
-      controlledOutcome(level),
-      'S',
-      'CONCURRENT_AGENT_LIMIT',
-      `The session allows ${concurrentAgentBudget} active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
-      'Wait for the current delegation to complete or increase concurrent-agents=N in a corrected directive.'
+      'AGENT_BUDGET_EXHAUSTED',
+      `The session allows ${agentBudget} concurrently active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
+      'Wait for the current delegation to complete or increase agents=N in a corrected directive.'
     );
   }
 

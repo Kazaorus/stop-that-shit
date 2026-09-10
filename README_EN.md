@@ -263,24 +263,17 @@ Add a boundary when you know it in advance:
 $stop-that-shit lock change files=src/config.cjs|test/config.test.cjs -- Fix this behavior.
 $stop-that-shit change deps=allow -- Add the requested parser dependency.
 $stop-that-shit change hash=allow -- Generate the requested release checksum.
-$stop-that-shit change total-agents=1 concurrent-agents=1 -- Use one independent test shard.
+$stop-that-shit change agents=1 -- Use one independent test shard.
 ```
 
-`total-agents=N` is the cumulative number of child agents successfully reserved
-in the session; changing the limits in that session does not reset it.
-`concurrent-agents=N` is the number of active reservation units. Both limits
-apply at the same time. When omitted, both default to
-`Number.MAX_SAFE_INTEGER`; `0` forbids delegation. If a batch exceeds either
-limit, the whole batch is rejected without queueing or partial execution.
-Only an `action.after` that explicitly confirms synchronous completion releases
-its active slots. Background or unknown-status calls remain reserved until an
-explicit subagent-stop or session-end event. Session end clears active slots but
-never refunds the cumulative total; adapters never guess reservation ownership
-from event arrival order.
-
-The legacy `agents=N` directive remains temporarily compatible but is deprecated:
-it maps to `total-agents=N` and returns a warning. A conflict with
-`total-agents=M`, or any invalid value, leaves the contract unchanged.
+`agents=N` is the maximum number of concurrently active subagents. When omitted it
+defaults to `Number.MAX_SAFE_INTEGER`; `0` forbids delegation. If a batch exceeds
+the limit, the whole batch is rejected without queueing or partial execution.
+An `action.after` that explicitly confirms synchronous completion, an explicit
+subagent-stop, or session end releases active slots. Background or unknown-status
+calls remain reserved until a reliable lifecycle event. Adapters never guess
+reservation ownership from event arrival order. Migration preserves a valid old
+`agentBudget`, including `0`, rather than silently widening the limit.
 
 Skip `files=` when you do not know every affected file. Codex should inspect the
 real call path and update the callers, fixtures, or tests needed to finish the
@@ -309,7 +302,7 @@ effect. Stop That Shit reports host effect as `unobserved`.
 | --- | --- | --- |
 | Write during `review`, `answer`, or `monitor` | Stop | Switch to `change` |
 | Add a dependency | Ask | `deps=allow` |
-| Launch a subagent | Stop above total or concurrent limit | `total-agents=N concurrent-agents=M` |
+| Launch a subagent | Stop above the active concurrency limit | `agents=N` |
 | Add a recognized hash operation | Stop | `hash=allow` |
 | Write outside a file lock | Stop | Expand `files=` |
 

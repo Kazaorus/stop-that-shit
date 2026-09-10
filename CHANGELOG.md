@@ -2,14 +2,11 @@
 
 ## Unreleased
 
-- **Agent limit split**：`total-agents=N` 与 `concurrent-agents=M` 分别控制
-  session 累计总量和活动 reservation；两个限制同时检查，batch 超限整批拒绝。
-  `agents=N` 暂时作为弃用 alias 映射到总量并给出 warning，旧 schema 的
-  `agentBudget=0` 也会保留。/ Split `total-agents=N` and
-  `concurrent-agents=M` into cumulative session usage and active reservations;
-  both limits apply atomically and oversized batches are rejected as a whole.
-  The legacy `agents=N` form remains temporarily accepted as a deprecated alias
-  for total usage, and schema migration preserves `agentBudget=0`.
+- **Active agent limit**：恢复 `agents=N` 作为正式的活动并发上限，默认不限，
+  `agents=0` 禁止 delegation，batch 超限整批拒绝；迁移保留旧的有效
+  `agentBudget`（包括 `0`）。/ Restored `agents=N` as the formal active
+  concurrency limit with an unlimited default, atomic batch rejection, and
+  migration that preserves a valid old `agentBudget`, including `0`.
 - **Lifecycle-safe concurrency**：同步完成的 `action.after` 才释放活动槽位；
   后台或未知状态的 delegation 保留到明确的 stop/session-end 事件，适配器按
   显式 host ID 关联，不使用 FIFO 猜测。/ Only confirmed synchronous

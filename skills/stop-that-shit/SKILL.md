@@ -90,22 +90,18 @@ Use a hard file lock only when the complete boundary is already known:
 $stop-that-shit lock change files=src/config.cjs|test/config.test.cjs -- Fix this behavior.
 ```
 
-Delegation limits are independent session controls:
+The active delegation limit is a session control:
 
 ```text
-$stop-that-shit change total-agents=N concurrent-agents=M -- Run the task.
+$stop-that-shit change agents=N -- Run the task.
 ```
 
-`total-agents` counts every child successfully reserved in the session and is
-not refunded or reset when the contract changes. `concurrent-agents` counts
-active reservation units. Only an explicitly synchronous `action.after` releases
-its reservation; background or unknown-status calls remain active until an
-explicit subagent-stop or session-end event. Session end clears active units but
-never refunds the total. Both limits apply together, default to
-`Number.MAX_SAFE_INTEGER`, and accept `0` to forbid delegation. A batch that
-exceeds either limit is rejected atomically. The legacy `agents=N` directive is
-temporarily accepted as a deprecated alias for `total-agents=N` and emits a
-warning; conflicts or invalid values do not partially update the contract.
+`agents=N` counts concurrently active reservation units. It defaults to
+`Number.MAX_SAFE_INTEGER`, and `0` forbids delegation. Only an explicitly
+synchronous `action.after`, an explicit subagent-stop, or session-end event
+releases active units. Background or unknown-status calls remain reserved until
+a reliable lifecycle event. A batch that exceeds the limit is rejected
+atomically. Migration preserves a valid old `agentBudget`, including `0`.
 Adapters bind lifecycle events only through explicit host identifiers and never
 pair reservations by arrival order.
 

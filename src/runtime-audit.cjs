@@ -49,9 +49,7 @@ function recordDecision(facts, options = {}) {
     contract: {
       mode: String(contract.mode || 'unconfirmed'),
       level: String(contract.level || 'watch'),
-      totalAgentBudget: Number.isSafeInteger(contract.totalAgentBudget) ? contract.totalAgentBudget : Number.MAX_SAFE_INTEGER,
-      concurrentAgentBudget: Number.isSafeInteger(contract.concurrentAgentBudget) ? contract.concurrentAgentBudget : Number.MAX_SAFE_INTEGER,
-      totalAgentsUsed: Number.isSafeInteger(delegation.totalAgentsUsed) ? delegation.totalAgentsUsed : 0,
+      agentBudget: Number.isSafeInteger(contract.agentBudget) ? contract.agentBudget : Number.MAX_SAFE_INTEGER,
       activeAgents: activeDelegationCount(delegation),
       hashPolicy: String(contract.hashPolicy || 'deny'),
       dependencyPolicy: String(contract.dependencyPolicy || 'ask'),
