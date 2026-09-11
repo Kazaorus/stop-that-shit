@@ -30,6 +30,7 @@ function hostMetadata(context = {}) {
 function toPromptEvent(input, context = {}) {
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'prompt.submit',
     sessionId: String(context.sessionId || ''),
     prompt: normalizePiPrompt(input && input.text),
@@ -59,6 +60,7 @@ function toActionEvent(input, context = {}) {
   };
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'action.before',
     sessionId: String(context.sessionId || ''),
     host: hostMetadata(context),
@@ -83,6 +85,7 @@ function toActionAfterEvent(input, context = {}) {
   }
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'action.after',
     sessionId: String(context.sessionId || ''),
     host: hostMetadata(context),
@@ -93,6 +96,7 @@ function toActionAfterEvent(input, context = {}) {
 function toSessionEndEvent(input, context = {}) {
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'session.end',
     sessionId: String(context.sessionId || input && input.sessionId || ''),
     host: hostMetadata(context)

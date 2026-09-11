@@ -64,8 +64,9 @@ on `SubagentStart`. Both hosts' `SubagentStop` events are stop attempts and do
 not release reservations. Claude background work without a supported joined
 result stays reserved. `UserPromptExpansion` remains an optional Claude prompt
 surface. Prompt-capable hosts return a native prompt block for invalid legacy
-or malformed directives, while the controller also records the error and
-rejects later delegation until a valid directive arrives.
+or malformed directives. The controller retains the previous contract and the
+error: Guard rejects later delegation until corrected, watch reports it, and
+off allows the action. Work permitted by watch/off still reserves capacity.
 
 Hermes native Plugin maps the following lifecycle events:
 
@@ -164,4 +165,6 @@ A known bounded call with an unknown result retains its existing capacity.
 Only matching terminal evidence clears unresolved activity. Sequential chains
 hold their capacity through individual step stops until the whole call joins.
 All contract and ledger writes use `updateSession`; reads have no write effect.
+Each adapter declares its own lifecycle version. Core protocol imports cannot
+substitute for that declaration; undeclared lifecycle events never change the ledger.
 See HOST-ADAPTER-CONTRACT.md for actual host evidence and unsupported paths.

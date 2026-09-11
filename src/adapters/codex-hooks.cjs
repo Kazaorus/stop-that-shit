@@ -31,6 +31,7 @@ function toControlEvent(input) {
 
   const event = {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind,
     sessionId: String(input.session_id || ''),
     turnId: input.turn_id || null,

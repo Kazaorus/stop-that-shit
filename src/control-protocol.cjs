@@ -12,6 +12,12 @@ const EVENT_KINDS = new Set([
 ]);
 const MUTABILITIES = new Set(['read', 'write', 'delegate', 'control', 'unknown']);
 
+function supportsLifecycleFacts(event) {
+  // The adapter must declare its own lifecycle semantics. Older adapters import
+  // PROTOCOL_VERSION from the runtime, so that number alone cannot identify them.
+  return event.protocolVersion === PROTOCOL_VERSION && event.lifecycleVersion === 2;
+}
+
 function nonEmptyString(value, field) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new TypeError(`ControlEvent field ${field} must be a non-empty string.`);
@@ -94,5 +100,6 @@ module.exports = {
   EVENT_KINDS,
   MUTABILITIES,
   PROTOCOL_VERSION,
+  supportsLifecycleFacts,
   assertControlEvent
 };

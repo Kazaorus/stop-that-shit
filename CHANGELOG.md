@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Corrected Hermes terminal `failed` results so synchronous batches and bound
+  background children return their reserved capacity after a confirmed failure.
+- Added adapter-owned lifecycle declarations. Historical adapters that import
+  a new core's protocol number can no longer masquerade as current adapters or
+  release reservations through old stop semantics.
+- Invalid-directive residue now respects watch/off for subsequent actions;
+  permitted work remains accounted for when the session returns to Guard.
 - Centralized delegation facts, reservation transitions, and per-call unresolved
   activity. Confirmed terminal evidence releases the corresponding call;
   unknown bounded results retain only their original reserved capacity.
@@ -11,9 +18,9 @@
 - Contract and lifecycle mutations share one session transaction. State reads
   do not write migrations. Schema 4 preserves old budgets, including zero,
   and carries forward unresolved legacy history.
-- ControlEvent v2 separates lifecycle facts from request flags. v1 false async
-  flags and stop events are no longer completion evidence. Finite Guard detects
-  old delegation/control adapters. Runtime counts describe reserved
+- ControlEvent v2 separates lifecycle facts from request flags. Undeclared
+  lifecycle events are not completion evidence. Finite Guard detects old
+  delegation/control adapters. Runtime counts describe reserved
   upper bounds rather than measured active processes.
 - Hermes task counting now follows the host's JSON-array and empty-batch inputs,
   closing two paths that could bypass `agents=0`.

@@ -1,7 +1,7 @@
 'use strict';
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = require('./contracts.cjs');
-const { assertControlEvent, PROTOCOL_VERSION } = require('./control-protocol.cjs');
+const { assertControlEvent, supportsLifecycleFacts } = require('./control-protocol.cjs');
 const { inspectDelegation, applyDelegationFact } = require('./delegation-state.cjs');
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
@@ -153,7 +153,7 @@ function handlePrompt(event, state, options) {
 }
 
 function handleBeforeAction(event, options) {
-  const legacyDelegationProtocol = event.protocolVersion < PROTOCOL_VERSION
+  const legacyDelegationProtocol = !supportsLifecycleFacts(event)
     && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
   const changesDelegation = event.action.mutability === 'delegate'
     || event.action.delegationLifecycleUnproven || legacyDelegationProtocol;
@@ -220,9 +220,10 @@ function handleBeforeAction(event, options) {
 }
 
 function handleAfterAction(event, options) {
+  if (!supportsLifecycleFacts(event)) return none();
   return updateSession(event.sessionId, options.dataDir, (state) => {
-    // v1 compatibility only accepts explicit completed evidence. A false async
-    // flag can be a request parameter and never proves that children have joined.
+    // Only a declared facts adapter may report binding or completion. A false
+    // async flag can be a request parameter and never proves children joined.
     const kind = event.action.lifecycle || (event.action.completed === true ? 'joined'
       : event.action.asyncLaunched === true ? 'running' : 'unknown');
     state.delegation = applyDelegationFact(state.delegation, {
@@ -236,9 +237,9 @@ function handleAfterAction(event, options) {
 }
 
 function handleLifecycleContext(event, options) {
-  // v1 adapters mapped stop attempts to terminal events. They cannot release
-  // reservations made by a v2 adapter in a mixed installation.
-  if (event.protocolVersion < PROTOCOL_VERSION && event.kind !== 'session.start') return none();
+  // An older adapter may borrow the current protocol number but still map stop
+  // attempts to terminal events. Its facts cannot mutate the current ledger.
+  if (!supportsLifecycleFacts(event) && event.kind !== 'session.start') return none();
   const update = (state) => {
     const fact = event.kind === 'subagent.start'
       ? { kind: 'child_started', agentId: event.agentId, agentAlias: event.agentAlias, reservationId: event.reservationId }

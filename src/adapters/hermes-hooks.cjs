@@ -28,6 +28,7 @@ function toControlEvent(input) {
   const extra = input.extra && typeof input.extra === 'object' ? input.extra : {};
   const event = {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind,
     sessionId: String(input.session_id || extra.parent_session_id || ''),
     turnId: extra.turn_id || extra.parent_turn_id || input.turn_id || null,
@@ -79,7 +80,7 @@ function toControlEvent(input) {
           event.action.agentAliases = result.subagent_ids.filter(id => typeof id === 'string' && id);
         }
       } else if (result && Array.isArray(result.results) && result.results.length
-          && result.results.every(entry => entry && ['completed', 'error'].includes(entry.status))) {
+          && result.results.every(entry => entry && ['completed', 'failed', 'error'].includes(entry.status))) {
         event.action.lifecycle = 'joined';
       }
     }
@@ -87,7 +88,7 @@ function toControlEvent(input) {
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
     // timeout/interrupted hooks can fire while a worker is still alive.
-    if (kind === 'subagent.stop' && !['completed', 'error'].includes(extra.child_status)) return null;
+    if (kind === 'subagent.stop' && !['completed', 'failed', 'error'].includes(extra.child_status)) return null;
     if (kind === 'subagent.start') {
       const alias = optionalIdentifier(extra.child_subagent_id, input.child_subagent_id);
       if (alias) event.agentAlias = alias;

@@ -174,7 +174,7 @@ test('controller decisions do not depend on model metadata', (t) => {
   const firstDir = dataDir(t);
   const secondDir = dataDir(t);
   const promptEvent = {
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'prompt.submit',
     sessionId: 'session-1',
     turnId: 'turn-1',
@@ -184,7 +184,7 @@ test('controller decisions do not depend on model metadata', (t) => {
   handleControlEvent({ ...promptEvent, host: { family: 'future-host', model: 'model-b' } }, { dataDir: secondDir });
 
   const action = {
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'action.before',
     sessionId: 'session-1',
     turnId: 'turn-1',
@@ -205,12 +205,12 @@ test('controller decisions do not depend on model metadata', (t) => {
 
 test('protocol rejects unknown versions and kinds', () => {
   assert.throws(() => assertControlEvent({ protocolVersion: 99, kind: 'prompt.submit', sessionId: 's', prompt: '' }), /protocolVersion/);
-  assert.throws(() => assertControlEvent({ protocolVersion: PROTOCOL_VERSION, kind: 'model.changed', sessionId: 's' }), /kind/);
+  assert.throws(() => assertControlEvent({ protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, kind: 'model.changed', sessionId: 's' }), /kind/);
 });
 
 test('protocol accepts only non-negative integer delegation counts', () => {
   const event = {
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'action.before',
     sessionId: 'session-1',
     action: { id: 'delegate-call', name: 'delegate_task', input: {}, mutability: 'delegate' }
@@ -242,7 +242,7 @@ test('protocol accepts only non-negative integer delegation counts', () => {
 
 test('protocol requires action identifiers only for delegation before-events', () => {
   assert.doesNotThrow(() => assertControlEvent({
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'action.before',
     sessionId: 'session-1',
     action: { name: 'write-file', mutability: 'write' }
@@ -250,7 +250,7 @@ test('protocol requires action identifiers only for delegation before-events', (
 
   for (const id of [undefined, null, '', '   ', 42]) {
     assert.throws(() => assertControlEvent({
-      protocolVersion: PROTOCOL_VERSION,
+      protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
       kind: 'action.before',
       sessionId: 'session-1',
       action: { id, name: 'delegate_task', mutability: 'delegate', delegationCount: 1 }
@@ -258,7 +258,7 @@ test('protocol requires action identifiers only for delegation before-events', (
   }
 
   assert.doesNotThrow(() => assertControlEvent({
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'action.before',
     sessionId: 'session-1',
     action: { id: 'delegate-call', name: 'delegate_task', mutability: 'delegate', delegationCount: 1 }
@@ -267,26 +267,26 @@ test('protocol requires action identifiers only for delegation before-events', (
 
 test('protocol accepts lifecycle events and action identifiers', () => {
   assert.doesNotThrow(() => assertControlEvent({
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'action.after',
     sessionId: 'session-1',
     action: { id: 'call-1', agentId: 'agent-1' }
   }));
   assert.doesNotThrow(() => assertControlEvent({
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'subagent.start',
     sessionId: 'session-1',
     agentId: 'agent-1',
     reservationId: 'reservation-1'
   }));
   assert.doesNotThrow(() => assertControlEvent({
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'subagent.stop',
     sessionId: 'session-1',
     agentId: 'agent-1'
   }));
   assert.doesNotThrow(() => assertControlEvent({
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
     kind: 'session.end',
     sessionId: 'session-1'
   }));
@@ -294,7 +294,7 @@ test('protocol accepts lifecycle events and action identifiers', () => {
 
 test('controller applies the active agent limit atomically', (t) => {
   const directory = dataDir(t);
-  const base = { protocolVersion: PROTOCOL_VERSION, sessionId: 'ledger-session' };
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'ledger-session' };
   handleControlEvent({
     ...base,
     kind: 'prompt.submit',
@@ -341,7 +341,7 @@ test('controller applies the active agent limit atomically', (t) => {
 
 test('subagent start and stop events are idempotent and synchronous action.after releases work', (t) => {
   const directory = dataDir(t);
-  const base = { protocolVersion: PROTOCOL_VERSION, sessionId: 'lifecycle-session' };
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'lifecycle-session' };
   handleControlEvent({ ...base, kind: 'prompt.submit', prompt: '$stop-that-shit change agents=2 -- delegate' }, { dataDir: directory });
   handleControlEvent({
     ...base,
@@ -372,7 +372,7 @@ test('subagent start and stop events are idempotent and synchronous action.after
 
 test('late duplicate starts cannot release another pending agent slot', (t) => {
   const directory = dataDir(t);
-  const base = { protocolVersion: PROTOCOL_VERSION, sessionId: 'late-start-session' };
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'late-start-session' };
   handleControlEvent({ ...base, kind: 'prompt.submit', prompt: '$stop-that-shit change agents=2 -- delegate' }, { dataDir: directory });
   handleControlEvent({
     ...base,
@@ -397,7 +397,7 @@ test('late duplicate starts cannot release another pending agent slot', (t) => {
 
 test('asynchronous action.after retains activity until explicit agent stops', (t) => {
   const directory = dataDir(t);
-  const base = { protocolVersion: PROTOCOL_VERSION, sessionId: 'async-lifecycle-session' };
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'async-lifecycle-session' };
   handleControlEvent({ ...base, kind: 'prompt.submit', prompt: '$stop-that-shit change agents=1 -- delegate' }, { dataDir: directory });
   handleControlEvent({
     ...base,
@@ -425,7 +425,7 @@ test('asynchronous action.after retains activity until explicit agent stops', (t
 
 test('subagent start requires an explicit reservation and does not use FIFO pairing', (t) => {
   const directory = dataDir(t);
-  const base = { protocolVersion: PROTOCOL_VERSION, sessionId: 'out-of-order-session' };
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'out-of-order-session' };
   handleControlEvent({ ...base, kind: 'prompt.submit', prompt: '$stop-that-shit change agents=2 -- delegate' }, { dataDir: directory });
   for (const id of ['call-a', 'call-b']) {
     handleControlEvent({
@@ -449,7 +449,7 @@ test('subagent start requires an explicit reservation and does not use FIFO pair
 
 test('replayed action ids do not reserve twice and conflicting counts are denied', (t) => {
   const directory = dataDir(t);
-  const base = { protocolVersion: PROTOCOL_VERSION, sessionId: 'replay-session' };
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'replay-session' };
   handleControlEvent({ ...base, kind: 'prompt.submit', prompt: '$stop-that-shit change agents=2 -- delegate' }, { dataDir: directory });
   const first = handleControlEvent({
     ...base,
@@ -477,7 +477,7 @@ test('replayed action ids do not reserve twice and conflicting counts are denied
 
 test('formal agents directive clears an earlier split-directive error', (t) => {
   const directory = dataDir(t);
-  const base = { protocolVersion: PROTOCOL_VERSION, sessionId: 'directive-session' };
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'directive-session' };
   const invalid = handleControlEvent({ ...base, kind: 'prompt.submit', prompt: '$stop-that-shit change total-agents=4 -- delegate' }, { dataDir: directory });
   assert.equal(invalid.kind, 'prompt-error');
   const valid = handleControlEvent({ ...base, kind: 'prompt.submit', prompt: '$stop-that-shit change agents=1 -- delegate' }, { dataDir: directory });

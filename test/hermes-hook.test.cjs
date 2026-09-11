@@ -245,3 +245,42 @@ test('Hermes runtime consumes post-tool and lifecycle events without observer ou
   }
   assert.deepEqual(readState(session, path.join(home, 'stop-that-shit')).delegation.reservations, {});
 });
+
+for (const mode of ['sync', 'background']) {
+  for (const [status, releases] of [['completed', true], ['failed', true], ['timeout', false], ['interrupted', false]]) {
+    test(`Hermes runtime ${mode} ${status} result ${releases ? 'permits' : 'blocks'} the next delegation`, (t) => {
+      const home = temporaryHome(t);
+      const session = `wire-${mode}-${status}`;
+      const input = { goal: 'Inspect the controller sources' };
+      const send = (payload) => {
+        const result = runHook(home, JSON.stringify(payload));
+        assert.equal(result.status, 0, result.stderr);
+        return result.stdout.trim() ? JSON.parse(result.stdout) : null;
+      };
+      send(prompt(session, '$stop-that-shit change agents=1 -- inspect'));
+      assert.equal(send(pre(session, 'delegate_task', input)), null);
+
+      const returned = post(session, 'delegate_task', input);
+      if (mode === 'background') {
+        assert.equal(send(lifecycle(session, 'subagent_start', {
+          parent_session_id: session, child_session_id: 'child-session', child_subagent_id: 'short-child'
+        })), null);
+        returned.extra.result = JSON.stringify({ status: 'dispatched', mode: 'background', count: 1, subagent_ids: ['short-child'] });
+        assert.equal(send(returned), null);
+        assert.equal(send(lifecycle(session, 'subagent_stop', {
+          parent_session_id: session, child_session_id: 'child-session', child_status: status
+        })), null);
+      } else {
+        returned.extra.result = JSON.stringify({ results: [{ task_index: 0, status }], total_duration_seconds: 1 });
+        assert.equal(send(returned), null);
+      }
+
+      const next = send(pre(session, 'delegate_task', input, 'next-call'));
+      if (releases) assert.equal(next, null);
+      else {
+        assert.equal(next?.action, 'block');
+        assert.match(next.message, /AGENT_BUDGET_EXHAUSTED/);
+      }
+    });
+  }
+}

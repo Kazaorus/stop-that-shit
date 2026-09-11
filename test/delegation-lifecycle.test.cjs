@@ -275,7 +275,7 @@ test('prompt updates share the delegation lock and preserve a concurrent reserva
       }
     };
     const { handleControlEvent } = require('./src/controller.cjs');
-    handleControlEvent({ protocolVersion: 2, kind: 'prompt.submit', sessionId: process.argv[1],
+    handleControlEvent({ protocolVersion: 2, lifecycleVersion: 2, kind: 'prompt.submit', sessionId: process.argv[1],
       prompt: '$stop-that-shit change agents=1 -- inspect' }, { dataDir: process.argv[2] });
     process.stdout.write('done\\n');
   `, session, dir], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -330,7 +330,7 @@ test('reading a legacy snapshot cannot overwrite a concurrently committed reserv
   Object.assign(initial.contract, { mode: 'change', level: 'off', agentBudget: 1 });
   state.writeState(sessionId, initial, dir);
   const file = state.statePath(sessionId, dir);
-  const launch = id => handleControlEvent({ protocolVersion: 2, sessionId, kind: 'action.before', action: { id, name: 'Agent', mutability: 'delegate' } }, { dataDir: dir });
+  const launch = id => handleControlEvent({ protocolVersion: 2, lifecycleVersion: 2, sessionId, kind: 'action.before', action: { id, name: 'Agent', mutability: 'delegate' } }, { dataDir: dir });
   const originalRead = fs.readFileSync;
   let first;
   fs.readFileSync = function(p, ...args) {
@@ -345,7 +345,7 @@ test('reading a legacy snapshot cannot overwrite a concurrently committed reserv
   finally { fs.readFileSync = originalRead; }
   assert.equal(first.kind, 'none');
   assert.equal(activeDelegationCount(state.readState(sessionId, dir).delegation), 1);
-  handleControlEvent({ protocolVersion: 2, sessionId, kind: 'prompt.submit', prompt: '$stop-that-shit change guard agents=1 -- continue' }, { dataDir: dir });
+  handleControlEvent({ protocolVersion: 2, lifecycleVersion: 2, sessionId, kind: 'prompt.submit', prompt: '$stop-that-shit change guard agents=1 -- continue' }, { dataDir: dir });
   assert.equal(launch('B').kind, 'deny');
 });
 

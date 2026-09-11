@@ -32,6 +32,7 @@ function hostMetadata(input) {
 function toPromptEvent(input, output, context = {}) {
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'prompt.submit',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
     prompt: promptText(output && output.parts),
@@ -58,6 +59,7 @@ function toActionEvent(input, output, context = {}) {
   if (toolName === 'task' && args && args.task_id) action.delegationLifecycleUnproven = true;
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'action.before',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
     sourceSessionId: String(input.sessionID),
@@ -81,6 +83,7 @@ function toActionAfterEvent(input, context = {}, output) {
   }
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'action.after',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
     sourceSessionId: String(input.sessionID),
@@ -94,6 +97,7 @@ function toSubagentStartEvent(input, context = {}) {
   if (!agentId) return null;
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'subagent.start',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
     host: hostMetadata(input),
@@ -106,6 +110,7 @@ function toSubagentStopEvent(input, context = {}) {
   if (!agentId) return null;
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'subagent.stop',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
     host: hostMetadata(input),
@@ -116,6 +121,7 @@ function toSubagentStopEvent(input, context = {}) {
 function toSessionEndEvent(input, context = {}) {
   return {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind: 'session.end',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
     host: hostMetadata(input)

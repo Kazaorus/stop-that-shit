@@ -4,10 +4,36 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { handleControlEvent } = require('../src/controller.cjs');
+
+for (const level of ['guard', 'watch', 'off']) {
+  test(`invalid directive residue respects ${level} during later delegation`, t => {
+    const { handleClaudeHook } = require('../src/adapters/claude-hooks.cjs');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-directive-level-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+    const hook = (hook_event_name, fields = {}) => handleClaudeHook({ session_id: level, hook_event_name, ...fields }, { dataDir });
+    hook('UserPromptSubmit', { prompt: `$stop-that-shit change ${level} agents=2 -- inspect` });
+    hook('UserPromptSubmit', { prompt: '$stop-that-shit agents=-1' });
+    hook('UserPromptSubmit', { prompt: 'Continue reading source' });
+    const launch = id => hook('PreToolUse', { tool_name: 'Agent', tool_use_id: id,
+      tool_input: { description: 'Inspect', prompt: 'Read the controller', subagent_type: 'general-purpose' } });
+    const result = launch('A');
+    assert.equal(result?.hookSpecificOutput?.permissionDecision === 'deny', level === 'guard');
+    if (level === 'watch') assert.match(result.hookSpecificOutput.additionalContext, /INVALID_DIRECTIVE/);
+    if (level === 'off') assert.equal(result, null);
+    // A corrected finite guard keeps work that watch/off actually permitted.
+    hook('UserPromptSubmit', { prompt: '$stop-that-shit change guard agents=1 -- inspect' });
+    assert.equal(launch('B')?.hookSpecificOutput?.permissionDecision === 'deny', level !== 'guard');
+    const activeCall = level === 'guard' ? 'B' : 'A';
+    hook('PostToolUse', { tool_name: 'Agent', tool_use_id: activeCall,
+      tool_response: { status: 'completed', agentId: 'finished-child' } });
+    assert.equal(launch('C'), null);
+  });
+}
+
 function session(t) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-facts-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
-  const send = (kind, fields = {}) => handleControlEvent({ protocolVersion: 2, sessionId: 'parent', kind, ...fields }, { dataDir });
+  const send = (kind, fields = {}) => handleControlEvent({ protocolVersion: 2, lifecycleVersion: 2, sessionId: 'parent', kind, ...fields }, { dataDir });
   return { send, prompt: text => send('prompt.submit', { prompt: `$stop-that-shit change ${text} -- inspect` }),
     before: (id, extra = {}) => send('action.before', { action: { id, name: 'Agent', mutability: 'delegate', ...extra } }),
     after: (id, lifecycle, extra = {}) => send('action.after', { action: { id, lifecycle, ...extra } }) };
@@ -72,13 +98,15 @@ test('call-scoped capacity survives individual step stops and ordinary session e
   s.after('chain', 'joined');
   assert.equal(s.before('C').kind, 'none');
 });
-test('v1 foreground flags are not completion evidence; confirmed results are', t => {
+test('legacy completion flags cannot mutate the ledger; declared facts can', t => {
   const s = session(t);
   s.prompt('guard agents=1');
   s.before('A', { asyncLaunched: false });
   s.send('action.after', { protocolVersion: 1, action: { id: 'A', asyncLaunched: false } });
   assert.equal(s.before('B').decision.reasonCode, 'AGENT_BUDGET_EXHAUSTED');
   s.send('action.after', { protocolVersion: 1, action: { id: 'A', completed: true } });
+  assert.equal(s.before('legacy-completed').decision.reasonCode, 'AGENT_BUDGET_EXHAUSTED');
+  s.after('A', 'joined');
   assert.equal(s.before('C').kind, 'none');
 });
 test('child sessions with equal call IDs do not share reservations', t => {

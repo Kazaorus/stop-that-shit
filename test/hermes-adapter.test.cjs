@@ -380,6 +380,50 @@ test('Hermes joined batch releases while a session-end notification alone does n
   assert.equal(readState('end-session', options.dataDir).delegation.reservations['reservation:delegate_task-call'].pendingCount, 1);
 });
 
+// Hermes _run_single_child returns failed for provider/output-schema failures
+// after its worker has returned and finally cleanup has run. Timeout and
+// interrupted results can still have a live worker and must retain capacity.
+// https://github.com/NousResearch/hermes-agent/blob/main/tools/delegate_tool.py
+for (const mode of ['sync', 'background']) {
+  for (const [status, releases] of [
+    ['completed', true], ['failed', true], ['error', true],
+    ['timeout', false], ['interrupted', false]
+  ]) {
+    test(`Hermes ${mode} ${status} result ${releases ? 'permits' : 'blocks'} the next delegation`, (t) => {
+      const { handleHermesHook } = adapter();
+      const options = workspace(t);
+      const session = `${mode}-${status}`;
+      const input = { goal: 'Inspect the controller sources' };
+      handleHermesHook(prompt(session, '$stop-that-shit change agents=1 -- inspect'), options);
+      assert.equal(handleHermesHook(pre(session, 'delegate_task', input), options), null);
+
+      if (mode === 'background') {
+        handleHermesHook(lifecycle(session, 'subagent_start', {
+          parent_session_id: session, child_session_id: 'child-session', child_subagent_id: 'short-child'
+        }), options);
+        handleHermesHook(post(session, 'delegate_task', input, 'delegate_task-call', {
+          result: JSON.stringify({ status: 'dispatched', mode: 'background', count: 1, subagent_ids: ['short-child'] })
+        }), options);
+        handleHermesHook(lifecycle(session, 'subagent_stop', {
+          parent_session_id: session, child_session_id: 'child-session', child_status: status
+        }), options);
+      } else {
+        handleHermesHook(post(session, 'delegate_task', input, 'delegate_task-call', {
+          result: JSON.stringify({ results: [{ task_index: 0, status }], total_duration_seconds: 1 })
+        }), options);
+      }
+
+      const next = { ...pre(session, 'delegate_task', input), tool_call_id: 'next-call' };
+      const result = handleHermesHook(next, options);
+      if (releases) assert.equal(result, null);
+      else {
+        assert.equal(result?.action, 'block');
+        assert.match(result.message, /AGENT_BUDGET_EXHAUSTED/);
+      }
+    });
+  }
+}
+
 test('Hermes delegation control actions do not reserve agent slots', (t) => {
   const { handleHermesHook } = adapter();
   const options = workspace(t);

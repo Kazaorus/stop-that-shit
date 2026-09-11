@@ -25,18 +25,27 @@ transitions. Contract and lifecycle writes share `updateSession` and its lock.
 Adapters never correlate by arrival order. OpenCode preserves source-session
 identity when calls from several children use a shared root contract.
 
-v1 completion results remain readable: explicit `completed: true` maps to joined
-and `asyncLaunched: true` maps to running. A false async flag or a v1 stop event
-never proves completion. Under a finite limit, Guard returns
-`LIFECYCLE_PROTOCOL_REQUIRED` for v1 delegation, control, and unknown actions;
-ordinary reads and writes remain compatible. Legacy actions permitted while
-observing or off leave unresolved history. Upgrade adapters and core together.
+Each adapter independently declares `lifecycleVersion: 2` as a fixed value.
+The core requires both this declaration and `protocolVersion: 2` before it
+accepts lifecycle facts. Importing the runtime's protocol number alone cannot
+identify an adapter: old adapters can inherit the new number while retaining
+old stop-attempt behavior. Missing or unsupported lifecycle declarations use
+the compatibility decision path, rather than throwing an operational error.
+
+Under a finite limit, Guard returns `LIFECYCLE_PROTOCOL_REQUIRED` for delegation,
+control, and unknown actions from an undeclared adapter. Ordinary prompts,
+reads, and writes remain compatible. Legacy activity permitted while observing
+or off leaves unresolved history. Undeclared completion, binding, child-stop
+and session-end events do not change the ledger, including `completed: true`.
+Upgrade adapters and core together; history already lost during a mixed install
+cannot be reconstructed, so use a new session for a finite guarantee.
 
 The normalized event is versioned as `ControlEvent v2`:
 
 ```json
 {
   "protocolVersion": 2,
+  "lifecycleVersion": 2,
   "kind": "action.before",
   "sessionId": "opaque",
   "action": {
@@ -179,10 +188,12 @@ The adapter reserves the complete `delegate_task` batch. Its serialized JSON
 result identifies a background dispatch through `status: dispatched`,
 `mode: background`, and `subagent_ids`. Start events map these aliases to
 `child_session_id`; later results or starts can complete the association.
-Only completed/error child-stop statuses release bound children. Timeout and
+Only completed/failed/error child-stop statuses release bound children. Timeout and
 interrupted statuses can occur while a worker is still alive and retain capacity.
-A synchronous result joins the batch only when all result entries are completed
-or error. Unknown result shapes and session-end notifications retain capacity.
+A synchronous result joins the batch only when all result entries are completed,
+failed or error. A failed result here means the child returned and was cleaned up,
+including provider rejection or invalid final output. Unknown result shapes and
+session-end notifications retain capacity.
 No fabricated `reservation_id` is required or accepted from Hermes lifecycle
 hooks. The generated runtime ships together with the adapter.
 

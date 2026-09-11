@@ -51,18 +51,17 @@ function decide({ contract, action, state = {}, delegation = inspectDelegation(s
   const delegationCount = action.mutability === 'delegate'
     ? (Number.isInteger(action.delegationCount) ? action.delegationCount : 1)
     : 0;
+  if (level === 'off' || mode === 'unconfirmed') {
+    return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
+  }
   if (action.mutability === 'delegate' && state.directiveError) {
     return decision(
-      'deny_and_explain',
+      controlledOutcome(level),
       'S',
       'INVALID_DIRECTIVE',
       `The active Stop That Shit directive is invalid: ${state.directiveError.message || state.directiveError.code || 'unknown directive error'}.`,
       'Submit a corrected agents=N directive before delegating.'
     );
-  }
-
-  if (level === 'off' || mode === 'unconfirmed') {
-    return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
   }
 
   const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
@@ -73,7 +72,7 @@ function decide({ contract, action, state = {}, delegation = inspectDelegation(s
       controlledOutcome(level),
       'S',
       'LIFECYCLE_PROTOCOL_REQUIRED',
-      'This adapter uses the legacy lifecycle protocol, which cannot prove that delegation and resume actions obey the finite limit.',
+      'This adapter has no supported lifecycle declaration, so it cannot prove that delegation and resume actions obey the finite limit.',
       'Update the host adapter and runtime together before using agents=N. Ordinary read and write actions remain available.'
     );
   }

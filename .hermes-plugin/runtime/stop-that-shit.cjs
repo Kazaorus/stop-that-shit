@@ -34,6 +34,7 @@ function toControlEvent(input) {
   const extra = input.extra && typeof input.extra === 'object' ? input.extra : {};
   const event = {
     protocolVersion: PROTOCOL_VERSION,
+    lifecycleVersion: 2,
     kind,
     sessionId: String(input.session_id || extra.parent_session_id || ''),
     turnId: extra.turn_id || extra.parent_turn_id || input.turn_id || null,
@@ -85,7 +86,7 @@ function toControlEvent(input) {
           event.action.agentAliases = result.subagent_ids.filter(id => typeof id === 'string' && id);
         }
       } else if (result && Array.isArray(result.results) && result.results.length
-          && result.results.every(entry => entry && ['completed', 'error'].includes(entry.status))) {
+          && result.results.every(entry => entry && ['completed', 'failed', 'error'].includes(entry.status))) {
         event.action.lifecycle = 'joined';
       }
     }
@@ -93,7 +94,7 @@ function toControlEvent(input) {
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
     // timeout/interrupted hooks can fire while a worker is still alive.
-    if (kind === 'subagent.stop' && !['completed', 'error'].includes(extra.child_status)) return null;
+    if (kind === 'subagent.stop' && !['completed', 'failed', 'error'].includes(extra.child_status)) return null;
     if (kind === 'subagent.start') {
       const alias = optionalIdentifier(extra.child_subagent_id, input.child_subagent_id);
       if (alias) event.agentAlias = alias;
@@ -147,6 +148,12 @@ const EVENT_KINDS = new Set([
   'session.end'
 ]);
 const MUTABILITIES = new Set(['read', 'write', 'delegate', 'control', 'unknown']);
+
+function supportsLifecycleFacts(event) {
+  // The adapter must declare its own lifecycle semantics. Older adapters import
+  // PROTOCOL_VERSION from the runtime, so that number alone cannot identify them.
+  return event.protocolVersion === PROTOCOL_VERSION && event.lifecycleVersion === 2;
+}
 
 function nonEmptyString(value, field) {
   if (typeof value !== 'string' || !value.trim()) {
@@ -230,6 +237,7 @@ module.exports = {
   EVENT_KINDS,
   MUTABILITIES,
   PROTOCOL_VERSION,
+  supportsLifecycleFacts,
   assertControlEvent
 };
 
@@ -238,7 +246,7 @@ module.exports = {
 'use strict';
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = __require("src/contracts.cjs");
-const { assertControlEvent, PROTOCOL_VERSION } = __require("src/control-protocol.cjs");
+const { assertControlEvent, supportsLifecycleFacts } = __require("src/control-protocol.cjs");
 const { inspectDelegation, applyDelegationFact } = __require("src/delegation-state.cjs");
 const { decide } = __require("src/decision.cjs");
 const { readRuntime, recordDecision } = __require("src/runtime-audit.cjs");
@@ -390,7 +398,7 @@ function handlePrompt(event, state, options) {
 }
 
 function handleBeforeAction(event, options) {
-  const legacyDelegationProtocol = event.protocolVersion < PROTOCOL_VERSION
+  const legacyDelegationProtocol = !supportsLifecycleFacts(event)
     && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
   const changesDelegation = event.action.mutability === 'delegate'
     || event.action.delegationLifecycleUnproven || legacyDelegationProtocol;
@@ -457,9 +465,10 @@ function handleBeforeAction(event, options) {
 }
 
 function handleAfterAction(event, options) {
+  if (!supportsLifecycleFacts(event)) return none();
   return updateSession(event.sessionId, options.dataDir, (state) => {
-    // v1 compatibility only accepts explicit completed evidence. A false async
-    // flag can be a request parameter and never proves that children have joined.
+    // Only a declared facts adapter may report binding or completion. A false
+    // async flag can be a request parameter and never proves children joined.
     const kind = event.action.lifecycle || (event.action.completed === true ? 'joined'
       : event.action.asyncLaunched === true ? 'running' : 'unknown');
     state.delegation = applyDelegationFact(state.delegation, {
@@ -473,9 +482,9 @@ function handleAfterAction(event, options) {
 }
 
 function handleLifecycleContext(event, options) {
-  // v1 adapters mapped stop attempts to terminal events. They cannot release
-  // reservations made by a v2 adapter in a mixed installation.
-  if (event.protocolVersion < PROTOCOL_VERSION && event.kind !== 'session.start') return none();
+  // An older adapter may borrow the current protocol number but still map stop
+  // attempts to terminal events. Its facts cannot mutate the current ledger.
+  if (!supportsLifecycleFacts(event) && event.kind !== 'session.start') return none();
   const update = (state) => {
     const fact = event.kind === 'subagent.start'
       ? { kind: 'child_started', agentId: event.agentId, agentAlias: event.agentAlias, reservationId: event.reservationId }
@@ -1046,18 +1055,17 @@ function decide({ contract, action, state = {}, delegation = inspectDelegation(s
   const delegationCount = action.mutability === 'delegate'
     ? (Number.isInteger(action.delegationCount) ? action.delegationCount : 1)
     : 0;
+  if (level === 'off' || mode === 'unconfirmed') {
+    return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
+  }
   if (action.mutability === 'delegate' && state.directiveError) {
     return decision(
-      'deny_and_explain',
+      controlledOutcome(level),
       'S',
       'INVALID_DIRECTIVE',
       `The active Stop That Shit directive is invalid: ${state.directiveError.message || state.directiveError.code || 'unknown directive error'}.`,
       'Submit a corrected agents=N directive before delegating.'
     );
-  }
-
-  if (level === 'off' || mode === 'unconfirmed') {
-    return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
   }
 
   const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
@@ -1068,7 +1076,7 @@ function decide({ contract, action, state = {}, delegation = inspectDelegation(s
       controlledOutcome(level),
       'S',
       'LIFECYCLE_PROTOCOL_REQUIRED',
-      'This adapter uses the legacy lifecycle protocol, which cannot prove that delegation and resume actions obey the finite limit.',
+      'This adapter has no supported lifecycle declaration, so it cannot prove that delegation and resume actions obey the finite limit.',
       'Update the host adapter and runtime together before using agents=N. Ordinary read and write actions remain available.'
     );
   }
@@ -1400,7 +1408,7 @@ module.exports = {
     "pretest": "npm run schema:check",
     "hermes:build": "node scripts/build-hermes-plugin.cjs",
     "hermes:check": "node scripts/build-hermes-plugin.cjs --check",
-    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/delegation-lifecycle.test.cjs test/delegation-facts.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
+    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/delegation-lifecycle.test.cjs test/delegation-facts.test.cjs test/lifecycle-compatibility.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
@@ -2190,7 +2198,7 @@ __modules["package.json"] = function(module) { module.exports = {
     "pretest": "npm run schema:check",
     "hermes:build": "node scripts/build-hermes-plugin.cjs",
     "hermes:check": "node scripts/build-hermes-plugin.cjs --check",
-    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/delegation-lifecycle.test.cjs test/delegation-facts.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
+    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/delegation-lifecycle.test.cjs test/delegation-facts.test.cjs test/lifecycle-compatibility.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
