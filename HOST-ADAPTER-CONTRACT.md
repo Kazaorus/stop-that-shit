@@ -12,14 +12,12 @@ An Adapter may reuse the decision module only if its host exposes:
 3. a before-action event that can actually deny an action;
 4. tool name, input, and enough information to classify mutability.
 
-Lifecycle context injection is optional. Codex deliberately keeps its original
-two-event surface (`UserPromptSubmit` and `PreToolUse`); it does not require or
-register a subagent-start Hook. Claude Code additionally uses `SessionStart`
-and `SubagentStart` because those host events provide useful context without
-changing the core policy. Direct Skill invocation is armed from
-`UserPromptSubmit`, so it works even on hosts that do not expose the
-`UserPromptExpansion` event; the adapter keeps its `UserPromptExpansion` handler
-for hosts that register it.
+Lifecycle context injection is host-specific, but all five adapters map
+available lifecycle signals to the shared protocol. `action.before` reserves a
+delegation batch atomically. An `action.after` releases active units only when
+the host explicitly confirms synchronous completion; background or unknown-status
+work remains reserved until `subagent.stop` or `session.end`. Adapters require
+explicit host identifiers and never pair reservations by event arrival order.
 
 The normalized event is versioned as `ControlEvent v1`:
 
@@ -54,20 +52,27 @@ SessionStart         -> session.start
 UserPromptSubmit     -> prompt.submit (also the /stop-that-shit:stop-that-shit slash form)
 PreToolUse            -> action.before
 SubagentStart         -> subagent.start
+SubagentStop          -> subagent.stop
+PostToolUse           -> action.after (by tool_use_id)
+SessionEnd            -> session.end
 UserPromptExpansion  -> prompt.submit (Stop That Shit Skill only; optional on hosts that expose it)
 ```
 
 The Claude adapter returns a `PreToolUse` `permissionDecision: "deny"` when the
-shared controller denies an action. `SubagentStart` is context-only; `agents=N`
-is enforced before a Claude `Agent` tool runs, then the started subagent receives
-the active contract as additional context.
+shared controller denies an action. `agents=N` is enforced before a Claude
+`Agent` tool runs. Its `PostToolUse` payload joins the real `tool_use_id` to the
+returned `tool_response.agentId`; `status: "completed"` releases the activity,
+while `status: "async_launched"` keeps it active. `SubagentStart` and
+`SubagentStop` use the host-provided `agent_id`; the adapter does not require or
+invent a `reservation_id` for Claude events.
 
 The classifier covers Claude-native `Write`, `Edit`, `NotebookEdit`,
 `EnterWorktree`, `Bash`, `PowerShell`, `Monitor`, `Agent`, current read tools,
 and control/task tools. `Monitor` command sources reuse shell dependency/hash
 classification; WebSocket monitors are read-only. `Workflow` is treated as
 unbounded delegation and is denied by an armed Guard because its internal
-subagent fan-out cannot be proven to satisfy `agents=N`. MCP/plugin tool names
+subagent fan-out cannot be proven to satisfy the configured agent limits.
+MCP/plugin tool names
 fall back to the existing conservative name classifier. Explicit file locks
 normalize POSIX and Windows absolute paths relative to Hook `cwd` when possible.
 
@@ -102,10 +107,16 @@ messages never advance the root contract, and the host permission layer
 continues to apply independently.
 
 OpenCode creates a new session identifier for each `task` subagent. The plugin
-maps child sessions to the root session contract, does not parse child prompts
-as new user authority, and treats a `task_id` continuation as control rather
-than a new delegation. If ancestry cannot be resolved, it fails open without
-treating the uncertain child prompt as user authority.
+maps child sessions to the root session contract. A task
+`tool.execute.before` reserves its child count and `tool.execute.after` emits
+`action.after` with the tool's explicit action ID and async status; a terminal
+child session update or documented `session.idle`/idle `session.status` event
+emits `subagent.stop` when the child was explicitly associated. Deleting the
+root session emits `session.end`, while deleting a child never clears the root
+reservation. The plugin does not parse child
+prompts as new user authority and treats a `task_id` continuation as control
+rather than a new delegation. If ancestry cannot be resolved, it fails open
+without treating the uncertain child prompt as user authority.
 
 ## Hermes Agent CLI
 
@@ -116,6 +127,9 @@ maps this deliberately small event surface:
 ```text
 Hermes pre_llm_call  -> prompt.submit
 Hermes pre_tool_call -> action.before
+Hermes post_tool_call -> action.after
+Hermes subagent_start/subagent_stop -> subagent.start/subagent.stop
+Hermes on_session_end -> session.end
 ```
 
 `pre_llm_call` maps `session_id` to `sessionId`,
@@ -128,10 +142,10 @@ top-level turn id) to `turnId`. A context result is rendered as
 `{"action":"block","message":"..."}`. Unknown events, empty payloads, and
 non-applicable allow results produce no stdout and exit successfully.
 
-The adapter does not register `subagent_start` or `subagent_stop`: those events
-are observers and cannot provide the before-action budget denial required for
-`agents=N`. Budget enforcement therefore occurs on the `delegate_task`
-`pre_tool_call`.
+The adapter reserves the complete `delegate_task` child count at
+`pre_tool_call`; lifecycle events bind and release the shared reservation. If
+Hermes does not identify a call as synchronous, the reservation is retained
+until an explicit `subagent_stop` or `on_session_end` event.
 
 ### Explicit Hermes tool coverage
 
@@ -144,7 +158,7 @@ path.
 | `write` | `write_file`, `patch` | Extracts real targets for file locks; missing targets remain unproven. |
 | `delegate` | `delegate_task` with one `goal` or a `tasks` batch | Reserves the number of child agents that will be started: one for `goal`, or `tasks.length` for a batch. The complete count is checked and reserved atomically before the tool runs. |
 | `read` | `read_file`, `search_files`, `web_search`, `web_extract`, `vision_analyze` | Known read-only allowlist. |
-| `control` | `clarify`, `todo`, and `delegate_task` with `action=list`, `action=steer`, or `action=stop` | Control operations; do not reserve `agents=N` units and are not repository writes. |
+| `control` | `clarify`, `todo`, and `delegate_task` with `action=list`, `action=steer`, or `action=stop` | Control operations; do not reserve agent-limit units and are not repository writes. |
 | shell-derived | `terminal` | Reuses the existing shell classifier: explicit reads are `read`, explicit writes are `write`, and unproven commands are `unknown`. |
 | `unknown` | `execute_code`, browser/computer-use, memory, cron, Skill management, message sending, and every unlisted built-in, plugin, or MCP tool | Fail open before an explicit contract; under `review`/`answer`/`monitor`, block as `MUTABILITY_UNPROVEN`. |
 
@@ -154,12 +168,10 @@ relative to Hook `cwd` with POSIX and Windows absolute-path handling. The
 adapter reuses the existing dependency/hash detectors and does not duplicate
 core mode, hash, dependency, file-lock, or agent-budget decisions.
 
-A Hermes `delegate_task` call containing `tasks=[...]` may start multiple child
-units, but the current budget is charged **per `delegate_task` tool call**, not
-per batch child. This limits the number of observed delegation calls; it does
-not claim to limit the total number of real child tasks started inside one
-batch. Charging each child would require a separately reviewed multi-unit
-reservation in the core controller, not a loop in this adapter.
+A Hermes `delegate_task` call containing `tasks=[...]` is charged by the actual
+child count: one for a non-empty `goal`, or `tasks.length` for a batch. The
+complete batch is checked against the active agent limit before execution; only
+confirmed synchronous completion releases active slots.
 
 ## Pi
 
@@ -170,7 +182,8 @@ The Pi package entrypoint is `pi/stop-that-shit.ts`. It is tested against
 input               -> prompt.submit
 before_agent_start  -> contract context message
 tool_call            -> action.before -> { block: true, reason } on denial
-tool_result          -> watch-only context appended to the tool result
+tool_result          -> action.after plus watch-only context appended to the tool result
+session_shutdown     -> session.end
 ```
 
 The Adapter takes the stable session ID from Pi's session manager, preserves
@@ -188,8 +201,12 @@ The explicit Pi table covers `read`, `grep`, `find`, `ls`, `write`, `edit`,
 `bash`, and `powershell`. Every unlisted custom or package tool remains
 `unknown`. The optional official `subagent` example is recognized only through
 its documented single, `tasks`, and `chain` input shapes. The parent tool call
-reserves the complete count atomically, but the separate child Pi processes do
-not inherit the parent contract through a proven standard ancestry channel.
+reserves the complete count atomically. Pi retains the pending reservation by
+`toolCallId` until `tool_result` emits `action.after`; an explicit background or
+unknown-status result remains active because the current Pi extension API does
+not expose a child-specific stop event, and `session_shutdown` is the cleanup
+boundary. Separate child Pi processes do not inherit the parent contract through
+a proven standard ancestry channel.
 Pi's user-initiated `!` and `!!` shell paths are outside the Agent `tool_call`
 surface.
 
@@ -201,7 +218,7 @@ omitted so the Agent can recover with an in-scope action.
 
 | Hermes surface | Status | Evidence and boundary |
 | --- | --- | --- |
-| Hermes CLI + native Plugin | Supported and tested offline | Real Hermes envelopes, adapter/controller cases, entrypoint wire tests, and parallel `agents=N` reservation tests. |
+| Hermes CLI + native Plugin | Supported and tested offline | Real Hermes envelopes, adapter/controller cases, lifecycle entrypoint tests, and parallel active-reservation tests. |
 | Hermes Gateway | Reload after lifecycle changes | Run `hermes gateway restart` after enabling, disabling, updating, rolling back, or reinstalling the plugin; it is not required on every use. |
 | cron, Kanban worker, ACP, Desktop, or paths bypassing the standard tool dispatcher | Not supported or declared | No adapter contract or matching test exists for these surfaces. |
 

@@ -8,7 +8,9 @@ const test = require('node:test');
 const {
   handlePiPrompt,
   handlePiTool,
+  handlePiToolAfter,
   normalizePiPrompt,
+  toActionAfterEvent,
   toActionEvent
 } = require('../src/adapters/pi-hooks.cjs');
 const {
@@ -68,6 +70,42 @@ test('Pi Adapter maps current built-in tool fields to ControlEvent v1', () => {
   assert.equal(event.action.mutability, 'write');
   assert.deepEqual(event.action.affectedPaths, ['src/config.cjs']);
   assert.equal(event.action.cwd, '/repo');
+});
+
+test('Pi Adapter maps tool completion to action.after using toolCallId', () => {
+  const event = toActionAfterEvent({
+    type: 'tool_result',
+    toolCallId: 'subagent-1',
+    toolName: 'subagent',
+    async_launched: false
+  }, context('session-1'));
+
+  assert.equal(event.kind, 'action.after');
+  assert.equal(event.sessionId, 'session-1');
+  assert.equal(event.action.id, 'subagent-1');
+  assert.equal(event.action.asyncLaunched, false);
+});
+
+test('Pi completion events leave async status unknown when the host omits it', () => {
+  assert.equal(toActionAfterEvent({ toolCallId: 'subagent-1', toolName: 'subagent' }).action.asyncLaunched, undefined);
+});
+
+test('Pi delegation reservations are released by action.after', (t) => {
+  const options = workspace(t);
+  handlePiPrompt(...prompt('delegation-session', '$stop-that-shit change agents=1 -- delegate'), options);
+  assert.equal(handlePiTool(...tool('delegation-session', 'subagent', {
+    agent: 'scout',
+    task: 'inspect'
+  }), options).kind, 'none');
+
+  assert.equal(handlePiToolAfter(...tool('delegation-session', 'subagent', {
+    agent: 'scout',
+    task: 'inspect'
+  }), options).kind, 'none');
+  assert.equal(handlePiTool(...tool('delegation-session', 'subagent', {
+    agent: 'scout',
+    task: 'inspect again'
+  }), options).kind, 'none');
 });
 
 test('Pi uses an explicit built-in allowlist and conservative custom-tool fallback', () => {
@@ -152,11 +190,11 @@ test('Pi subagent batches reserve atomically against agents=N', (t) => {
     tasks: [{ agent: 'scout', task: 'A' }, { agent: 'scout', task: 'B' }]
   }), options);
   assert.match(denied.message, /S\/AGENT_BUDGET_EXHAUSTED/);
-  assert.equal(readState('batch-denied', options.dataDir).contract.agentsUsed, 0);
+  assert.deepEqual(readState('batch-denied', options.dataDir).delegation.reservations, {});
 
   handlePiPrompt(...prompt('batch-allowed', '$stop-that-shit change agents=2 -- delegate twice'), options);
   assert.equal(handlePiTool(...tool('batch-allowed', 'subagent', {
     chain: [{ agent: 'worker', task: 'A' }, { agent: 'reviewer', task: 'B' }]
   }), options).kind, 'none');
-  assert.equal(readState('batch-allowed', options.dataDir).contract.agentsUsed, 2);
+  assert.equal(readState('batch-allowed', options.dataDir).delegation.reservations['reservation:subagent-1'].pendingCount, 2);
 });

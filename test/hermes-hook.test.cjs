@@ -35,13 +35,41 @@ function prompt(session, text) {
   });
 }
 
-function pre(session, toolName, toolInput) {
+function pre(session, toolName, toolInput, toolCallId = `${toolName}-call`) {
   return hermesEnvelope({
     hook_event_name: 'pre_tool_call',
     tool_name: toolName,
     tool_input: toolInput,
     session_id: session,
-    extra: { user_message: '' }
+    tool_call_id: toolCallId,
+    extra: { user_message: '', tool_call_id: toolCallId }
+  });
+}
+
+function post(session, toolName, toolInput, toolCallId = `${toolName}-call`) {
+  return hermesEnvelope({
+    hook_event_name: 'post_tool_call',
+    tool_name: toolName,
+    tool_input: toolInput,
+    tool_call_id: toolCallId,
+    session_id: session,
+    extra: {
+      user_message: '',
+      tool_call_id: toolCallId,
+      result: 'done',
+      status: 'success',
+      async_launched: false
+    }
+  });
+}
+
+function lifecycle(session, hookEventName, extra = {}) {
+  return hermesEnvelope({
+    hook_event_name: hookEventName,
+    tool_name: null,
+    tool_input: null,
+    session_id: session,
+    extra
   });
 }
 
@@ -145,8 +173,10 @@ test('parallel Hermes hook processes cannot oversubscribe agents=1', async (t) =
   const armed = runHook(home, JSON.stringify(prompt(session, '$stop-that-shit change agents=1 -- one delegation')));
   assert.equal(armed.status, 0, armed.stderr);
 
-  const payload = pre(session, 'delegate_task', { goal: 'inspect tests' });
-  const results = await Promise.all([runHookAsync(home, payload), runHookAsync(home, payload)]);
+  const results = await Promise.all([
+    runHookAsync(home, pre(session, 'delegate_task', { goal: 'inspect tests' }, 'delegate_task-call-a')),
+    runHookAsync(home, pre(session, 'delegate_task', { goal: 'inspect tests' }, 'delegate_task-call-b'))
+  ]);
   assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.stderr).join('\n'));
   const parsed = results.map((result) => result.stdout.trim() ? JSON.parse(result.stdout) : null);
   assert.equal(parsed.filter((value) => value === null).length, 1);
@@ -159,13 +189,49 @@ test('parallel Hermes batches reserve all child agents atomically', async (t) =>
   const armed = runHook(home, JSON.stringify(prompt(session, '$stop-that-shit change agents=2 -- one complete batch')));
   assert.equal(armed.status, 0, armed.stderr);
 
-  const payload = pre(session, 'delegate_task', {
-    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
-  });
-  const results = await Promise.all([runHookAsync(home, payload), runHookAsync(home, payload)]);
+  const taskInput = { tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }] };
+  const results = await Promise.all([
+    runHookAsync(home, pre(session, 'delegate_task', taskInput, 'delegate_task-call-a')),
+    runHookAsync(home, pre(session, 'delegate_task', taskInput, 'delegate_task-call-b'))
+  ]);
   assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.stderr).join('\n'));
   const parsed = results.map((result) => result.stdout.trim() ? JSON.parse(result.stdout) : null);
   assert.equal(parsed.filter((value) => value === null).length, 1);
   assert.equal(parsed.filter((value) => value?.action === 'block' && /AGENT_BUDGET_EXHAUSTED/.test(value.message)).length, 1);
-  assert.equal(readState(session, path.join(home, 'stop-that-shit')).contract.agentsUsed, 2);
+  const state = readState(session, path.join(home, 'stop-that-shit'));
+  assert.equal(Object.keys(state.delegation.reservations).length, 1);
+  assert.equal(Object.values(state.delegation.reservations)[0].pendingCount, 2);
+});
+
+test('Hermes runtime consumes post-tool and lifecycle events without observer output', (t) => {
+  const home = temporaryHome(t);
+  const session = 'wire-lifecycle-session';
+  const armed = runHook(home, JSON.stringify(prompt(session, '$stop-that-shit change agents=2 -- delegate')));
+  assert.equal(armed.status, 0, armed.stderr);
+
+  const delegated = runHook(home, JSON.stringify(pre(session, 'delegate_task', {
+    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
+  })));
+  assert.equal(delegated.status, 0, delegated.stderr);
+  assert.equal(delegated.stdout, '');
+
+  const started = runHook(home, JSON.stringify(lifecycle(session, 'subagent_start', {
+    child_session_id: 'wire-child-session',
+    reservation_id: 'reservation:delegate_task-call'
+  })));
+  const stopped = runHook(home, JSON.stringify(lifecycle(session, 'subagent_stop', {
+    child_session_id: 'wire-child-session'
+  })));
+  const completed = runHook(home, JSON.stringify(post(session, 'delegate_task', {
+    tasks: [{ goal: 'inspect A' }, { goal: 'inspect B' }]
+  })));
+  for (const result of [started, stopped, completed]) {
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+  }
+  assert.deepEqual(readState(session, path.join(home, 'stop-that-shit')).delegation.reservations, {});
+
+  const ended = runHook(home, JSON.stringify(lifecycle(session, 'on_session_end')));
+  assert.equal(ended.status, 0, ended.stderr);
+  assert.equal(ended.stdout, '');
 });

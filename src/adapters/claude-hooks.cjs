@@ -9,13 +9,17 @@ const {
   extractAffectedPaths,
   isUnboundedDelegation
 } = require('./claude-tool-classifier.cjs');
+const { optionalIdentifier, readAsyncLaunched } = require('./lifecycle-fields.cjs');
 
 const EVENT_KIND = {
   SessionStart: 'session.start',
   UserPromptSubmit: 'prompt.submit',
   UserPromptExpansion: 'prompt.submit',
   PreToolUse: 'action.before',
-  SubagentStart: 'subagent.start'
+  PostToolUse: 'action.after',
+  SubagentStart: 'subagent.start',
+  SubagentStop: 'subagent.stop',
+  SessionEnd: 'session.end'
 };
 
 function isStopThatShitExpansion(input) {
@@ -36,6 +40,21 @@ function slashDirective(prompt) {
   if (!match) return null;
   const args = (match[1] || '').trim();
   return `$stop-that-shit${args ? ` ${args}` : ''}`;
+}
+
+function claudeAsyncLaunched(input) {
+  const response = input && input.tool_response;
+  const status = response && typeof response.status === 'string'
+    ? response.status.toLowerCase()
+    : '';
+  if (status === 'async_launched') return true;
+  if (status === 'completed') return false;
+  return readAsyncLaunched(input, input && input.tool_input, response);
+}
+
+function claudeResponseAgentId(input) {
+  const response = input && input.tool_response;
+  return optionalIdentifier(response && response.agentId, response && response.agent_id);
 }
 
 function toControlEvent(input) {
@@ -67,18 +86,39 @@ function toControlEvent(input) {
       : slashDirective(input.prompt) || String(input.prompt || '');
   }
 
-  if (kind === 'action.before') {
+  if (kind === 'action.after') {
+    const actionId = optionalIdentifier(input.tool_use_id, input.tool_call_id);
+    if (!actionId) return null;
     event.action = {
-      id: input.tool_use_id || null,
+      id: actionId
+    };
+    const agentId = claudeResponseAgentId(input);
+    if (agentId) event.action.agentId = agentId;
+    const asyncLaunched = claudeAsyncLaunched(input);
+    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
+  }
+
+  if (kind === 'action.before') {
+    const mutability = classifyClaudeTool(input.tool_name, input.tool_input);
+    const actionId = optionalIdentifier(input.tool_use_id, input.tool_call_id);
+    if (mutability === 'delegate' && !actionId) return null;
+    event.action = {
+      id: actionId,
       name: String(input.tool_name || 'unknown'),
       input: input.tool_input,
-      mutability: classifyClaudeTool(input.tool_name, input.tool_input),
+      mutability,
       hashIntent: detectHashIntent(input.tool_name, input.tool_input),
       dependencyIntent: detectDependencyIntent(input.tool_name, input.tool_input, input.cwd),
       affectedPaths: extractAffectedPaths(input.tool_name, input.tool_input, input.cwd),
       cwd: input.cwd,
       unboundedDelegation: isUnboundedDelegation(input.tool_name)
     };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input);
+    if (mutability === 'delegate' && asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
+  }
+
+  if (kind === 'subagent.start' || kind === 'subagent.stop') {
+    event.agentId = optionalIdentifier(input.agent_id, input.agentId);
   }
 
   return event;
@@ -96,7 +136,15 @@ function contextOutput(hookEventName, text) {
 function fromControlResult(hookEventName, result) {
   if (!result || result.kind === 'none') return null;
 
+  if (result.kind === 'prompt-error') {
+    return {
+      decision: 'block',
+      reason: result.message
+    };
+  }
+
   if (result.kind === 'context') {
+    if (['PostToolUse', 'SubagentStop', 'SessionEnd'].includes(hookEventName)) return null;
     return contextOutput(hookEventName, result.text);
   }
 

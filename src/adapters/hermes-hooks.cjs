@@ -9,10 +9,15 @@ const {
   detectHashIntent,
   extractAffectedPaths
 } = require('./hermes-tool-classifier.cjs');
+const { optionalIdentifier, readAsyncLaunched } = require('./lifecycle-fields.cjs');
 
 const EVENT_KIND = {
   pre_llm_call: 'prompt.submit',
-  pre_tool_call: 'action.before'
+  pre_tool_call: 'action.before',
+  post_tool_call: 'action.after',
+  subagent_start: 'subagent.start',
+  subagent_stop: 'subagent.stop',
+  on_session_end: 'session.end'
 };
 
 function toControlEvent(input) {
@@ -24,8 +29,8 @@ function toControlEvent(input) {
   const event = {
     protocolVersion: PROTOCOL_VERSION,
     kind,
-    sessionId: String(input.session_id || ''),
-    turnId: extra.turn_id || input.turn_id || null,
+    sessionId: String(input.session_id || extra.parent_session_id || ''),
+    turnId: extra.turn_id || extra.parent_turn_id || input.turn_id || null,
     host: {
       family: 'hermes-agent',
       model: input.model || extra.model || null,
@@ -40,11 +45,14 @@ function toControlEvent(input) {
   }
 
   if (kind === 'action.before') {
-    event.action = {
-      id: input.tool_call_id || extra.tool_call_id || null,
+    const mutability = classifyHermesTool(input.tool_name, input.tool_input);
+    const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
+    if (mutability === 'delegate' && !actionId) return null;
+    const action = {
+      id: actionId,
       name: String(input.tool_name || 'unknown'),
       input: input.tool_input,
-      mutability: classifyHermesTool(input.tool_name, input.tool_input),
+      mutability,
       delegationCount: countHermesDelegation(input.tool_name, input.tool_input),
       hashIntent: detectHashIntent(input.tool_name, input.tool_input),
       dependencyIntent: detectDependencyIntent(input.tool_name, input.tool_input),
@@ -52,14 +60,42 @@ function toControlEvent(input) {
       cwd: input.cwd,
       unboundedDelegation: false
     };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
+    if (mutability === 'delegate' && asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
+    event.action = {
+      ...action
+    };
+  }
+
+  if (kind === 'action.after') {
+    const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
+    if (!actionId) return null;
+    event.action = { id: String(actionId) };
+    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
+    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
+  }
+
+  if (kind === 'subagent.start' || kind === 'subagent.stop') {
+    const agentId = extra.child_session_id
+      || input.child_session_id
+      || extra.child_subagent_id
+      || input.child_subagent_id
+      || null;
+    const normalizedAgentId = optionalIdentifier(agentId);
+    if (normalizedAgentId) event.agentId = normalizedAgentId;
+    const reservationId = optionalIdentifier(extra.reservation_id, extra.reservationId);
+    if (reservationId) event.reservationId = reservationId;
   }
 
   return event;
 }
 
-function fromControlResult(result) {
+function fromControlResult(result, kind) {
   if (!result || result.kind === 'none') return null;
-  if (result.kind === 'context') return { context: result.text };
+  if (result.kind === 'context') {
+    if (['subagent.start', 'subagent.stop', 'session.end'].includes(kind)) return null;
+    return { context: result.text };
+  }
   if (result.kind === 'deny') return { action: 'block', message: result.message };
   return null;
 }
@@ -67,7 +103,7 @@ function fromControlResult(result) {
 function handleHermesHook(input, options = {}) {
   const event = toControlEvent(input);
   if (!event) return null;
-  return fromControlResult(handleControlEvent(event, options));
+  return fromControlResult(handleControlEvent(event, options), event.kind);
 }
 
 module.exports = {

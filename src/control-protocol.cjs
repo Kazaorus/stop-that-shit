@@ -5,7 +5,10 @@ const EVENT_KINDS = new Set([
   'session.start',
   'prompt.submit',
   'action.before',
-  'subagent.start'
+  'action.after',
+  'subagent.start',
+  'subagent.stop',
+  'session.end'
 ]);
 const MUTABILITIES = new Set(['read', 'write', 'delegate', 'control', 'unknown']);
 
@@ -38,11 +41,32 @@ function assertControlEvent(event) {
     if (!MUTABILITIES.has(event.action.mutability)) {
       throw new TypeError(`Unsupported action mutability: ${event.action.mutability}.`);
     }
+    if (event.action.mutability === 'delegate') nonEmptyString(event.action.id, 'action.id');
     if (
       event.action.delegationCount !== undefined
       && (!Number.isInteger(event.action.delegationCount) || event.action.delegationCount < 0)
     ) {
       throw new TypeError('ControlEvent action.delegationCount must be a non-negative integer.');
+    }
+    if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
+      throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
+    }
+  }
+  if (event.kind === 'action.after') {
+    if (!event.action || typeof event.action !== 'object') {
+      throw new TypeError(`ControlEvent ${event.kind} requires an action object.`);
+    }
+    nonEmptyString(event.action.id, 'action.id');
+    if (event.action.agentId !== undefined && event.action.agentId !== null) {
+      nonEmptyString(event.action.agentId, 'action.agentId');
+    }
+    if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
+      throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
+    }
+  }
+  if (event.kind === 'subagent.start' || event.kind === 'subagent.stop') {
+    for (const field of ['agentId', 'reservationId']) {
+      if (event[field] !== undefined && event[field] !== null) nonEmptyString(event[field], field);
     }
   }
 
