@@ -273,7 +273,7 @@ test('protocol accepts lifecycle events and action identifiers', () => {
     protocolVersion: 1,
     kind: 'action.after',
     sessionId: 'session-1',
-    action: { id: 'call-1' }
+    action: { id: 'call-1', agentId: 'agent-1' }
   }));
   assert.doesNotThrow(() => assertControlEvent({
     protocolVersion: 1,

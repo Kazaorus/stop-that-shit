@@ -60,10 +60,11 @@ UserPromptExpansion  -> prompt.submit (Stop That Shit Skill only; optional on ho
 
 The Claude adapter returns a `PreToolUse` `permissionDecision: "deny"` when the
 shared controller denies an action. `agents=N` is enforced before a Claude
-`Agent` tool runs; the
-started subagent binds by an explicit `reservation_id`, and `agent_id` is used
-for stop events. A `PostToolUse` event releases activity only when its payload
-confirms synchronous completion; otherwise the reservation remains active.
+`Agent` tool runs. Its `PostToolUse` payload joins the real `tool_use_id` to the
+returned `tool_response.agentId`; `status: "completed"` releases the activity,
+while `status: "async_launched"` keeps it active. `SubagentStart` and
+`SubagentStop` use the host-provided `agent_id`; the adapter does not require or
+invent a `reservation_id` for Claude events.
 
 The classifier covers Claude-native `Write`, `Edit`, `NotebookEdit`,
 `EnterWorktree`, `Bash`, `PowerShell`, `Monitor`, `Agent`, current read tools,

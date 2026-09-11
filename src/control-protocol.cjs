@@ -57,6 +57,9 @@ function assertControlEvent(event) {
       throw new TypeError(`ControlEvent ${event.kind} requires an action object.`);
     }
     nonEmptyString(event.action.id, 'action.id');
+    if (event.action.agentId !== undefined && event.action.agentId !== null) {
+      nonEmptyString(event.action.agentId, 'action.agentId');
+    }
     if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
       throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
     }

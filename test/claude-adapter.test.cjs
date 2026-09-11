@@ -64,20 +64,20 @@ test('Claude Adapter maps lifecycle Hook fields to ControlEvent v1', () => {
     hook_event_name: 'PostToolUse',
     tool_use_id: 'call-1',
     tool_name: 'Agent',
-    tool_input: { prompt: 'inspect' }
+    tool_input: { prompt: 'inspect', run_in_background: false },
+    tool_response: { status: 'completed', agentId: 'agent-1' }
   });
   assert.equal(after.kind, 'action.after');
-  assert.deepEqual(after.action, { id: 'call-1' });
+  assert.deepEqual(after.action, { id: 'call-1', asyncLaunched: false, agentId: 'agent-1' });
 
   const start = toControlEvent({
     session_id: 'lifecycle-session',
     hook_event_name: 'SubagentStart',
     agent_id: 'agent-1',
-    reservation_id: 'reservation:call-1'
   });
   assert.equal(start.kind, 'subagent.start');
   assert.equal(start.agentId, 'agent-1');
-  assert.equal(start.reservationId, 'reservation:call-1');
+  assert.equal(start.reservationId, undefined);
 
   const stop = toControlEvent({
     session_id: 'lifecycle-session',
@@ -117,16 +117,24 @@ test('Claude prompt hooks reject split directives and accept formal agents synta
 test('Claude lifecycle hooks update and clear delegation state', (t) => {
   const options = workspace(t);
   handleClaudeHook(prompt('lifecycle', '$stop-that-shit change agents=4 -- delegate'), options);
-  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect', async_launched: false }), options);
+  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect', run_in_background: true }, root, 'call-1'), options);
 
   handleClaudeHook({
     session_id: 'lifecycle',
     hook_event_name: 'SubagentStart',
     agent_id: 'agent-1',
-    reservation_id: 'reservation:Agent-1',
     cwd: root
   }, options);
-  assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations['reservation:Agent-1'].agentIds, ['agent-1']);
+  handleClaudeHook({
+    session_id: 'lifecycle',
+    hook_event_name: 'PostToolUse',
+    tool_use_id: 'call-1',
+    tool_name: 'Agent',
+    tool_input: { prompt: 'inspect', run_in_background: true },
+    tool_response: { status: 'async_launched', agentId: 'agent-1' },
+    cwd: root
+  }, options);
+  assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations['reservation:call-1'].agentIds, ['agent-1']);
 
   const stopped = handleClaudeHook({
     session_id: 'lifecycle',
@@ -137,19 +145,20 @@ test('Claude lifecycle hooks update and clear delegation state', (t) => {
   assert.equal(stopped, null);
   assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations, {});
 
-  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect again', async_launched: false }), options);
+  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect again', run_in_background: false }, root, 'call-2'), options);
   const completed = handleClaudeHook({
     session_id: 'lifecycle',
     hook_event_name: 'PostToolUse',
-    tool_use_id: 'Agent-1',
+    tool_use_id: 'call-2',
     tool_name: 'Agent',
-    tool_input: { prompt: 'inspect again' },
+    tool_input: { prompt: 'inspect again', run_in_background: false },
+    tool_response: { status: 'completed', agentId: 'agent-2' },
     cwd: root
   }, options);
   assert.equal(completed, null);
   assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations, {});
 
-  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect final', async_launched: false }), options);
+  handleClaudeHook(pre('lifecycle', 'Agent', { prompt: 'inspect final', run_in_background: false }, root, 'call-3'), options);
   const ended = handleClaudeHook({
     session_id: 'lifecycle',
     hook_event_name: 'SessionEnd',
@@ -158,6 +167,109 @@ test('Claude lifecycle hooks update and clear delegation state', (t) => {
   }, options);
   assert.equal(ended, null);
   assert.deepEqual(readState('lifecycle', options.dataDir).delegation.reservations, {});
+});
+
+test('Claude keeps a reservation when a foreground Agent moves to the background', (t) => {
+  const options = workspace(t);
+  handleClaudeHook(prompt('foreground-background', '$stop-that-shit change agents=1 -- delegate'), options);
+  handleClaudeHook(pre('foreground-background', 'Agent', {
+    prompt: 'inspect',
+    run_in_background: false
+  }, root, 'call-foreground'), options);
+
+  handleClaudeHook({
+    session_id: 'foreground-background',
+    hook_event_name: 'PostToolUse',
+    tool_use_id: 'call-foreground',
+    tool_name: 'Agent',
+    tool_input: { prompt: 'inspect', run_in_background: false },
+    tool_response: { status: 'async_launched', agentId: 'agent-background' },
+    cwd: root
+  }, options);
+
+  const retained = readState('foreground-background', options.dataDir);
+  assert.equal(retained.delegation.reservations['reservation:call-foreground'].asyncLaunched, true);
+  assert.deepEqual(retained.delegation.reservations['reservation:call-foreground'].agentIds, ['agent-background']);
+  const denied = handleClaudeHook(pre('foreground-background', 'Agent', {
+    prompt: 'second',
+    run_in_background: true
+  }, root, 'call-second'), options);
+  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /S\/AGENT_BUDGET_EXHAUSTED/);
+
+  handleClaudeHook({
+    session_id: 'foreground-background',
+    hook_event_name: 'SubagentStop',
+    agent_id: 'agent-background',
+    cwd: root
+  }, options);
+  assert.deepEqual(readState('foreground-background', options.dataDir).delegation.reservations, {});
+});
+
+test('Claude releases a background Agent through real agentId fields without reservation_id', (t) => {
+  const options = workspace(t);
+  handleClaudeHook(prompt('background-complete', '$stop-that-shit change agents=1 -- delegate'), options);
+  handleClaudeHook(pre('background-complete', 'Agent', {
+    prompt: 'inspect',
+    run_in_background: true
+  }, root, 'call-background'), options);
+
+  handleClaudeHook({
+    session_id: 'background-complete',
+    hook_event_name: 'SubagentStart',
+    agent_id: 'agent-background',
+    agent_type: 'Explore',
+    cwd: root
+  }, options);
+  handleClaudeHook({
+    session_id: 'background-complete',
+    hook_event_name: 'PostToolUse',
+    tool_use_id: 'call-background',
+    tool_name: 'Agent',
+    tool_input: { prompt: 'inspect', run_in_background: true },
+    tool_response: { status: 'async_launched', agentId: 'agent-background' },
+    cwd: root
+  }, options);
+  assert.deepEqual(readState('background-complete', options.dataDir).delegation.reservations['reservation:call-background'].agentIds, ['agent-background']);
+
+  handleClaudeHook({
+    session_id: 'background-complete',
+    hook_event_name: 'SubagentStop',
+    agent_id: 'agent-background',
+    agent_type: 'Explore',
+    cwd: root
+  }, options);
+  assert.deepEqual(readState('background-complete', options.dataDir).delegation.reservations, {});
+
+  const next = handleClaudeHook(pre('background-complete', 'Agent', {
+    prompt: 'inspect again',
+    run_in_background: false
+  }, root, 'call-next'), options);
+  assert.equal(next, null);
+});
+
+test('Claude foreground Agent completion releases its slot for the next call', (t) => {
+  const options = workspace(t);
+  handleClaudeHook(prompt('foreground-complete', '$stop-that-shit change agents=1 -- delegate'), options);
+  handleClaudeHook(pre('foreground-complete', 'Agent', {
+    prompt: 'inspect',
+    run_in_background: false
+  }, root, 'call-foreground'), options);
+  handleClaudeHook({
+    session_id: 'foreground-complete',
+    hook_event_name: 'PostToolUse',
+    tool_use_id: 'call-foreground',
+    tool_name: 'Agent',
+    tool_input: { prompt: 'inspect', run_in_background: false },
+    tool_response: { status: 'completed', agentId: 'agent-foreground' },
+    cwd: root
+  }, options);
+
+  assert.deepEqual(readState('foreground-complete', options.dataDir).delegation.reservations, {});
+  const next = handleClaudeHook(pre('foreground-complete', 'Agent', {
+    prompt: 'inspect again',
+    run_in_background: false
+  }, root, 'call-next'), options);
+  assert.equal(next, null);
 });
 
 test('Claude ignores PostToolUse events without a valid action identifier', () => {

@@ -179,6 +179,9 @@ function assertControlEvent(event) {
       throw new TypeError(`ControlEvent ${event.kind} requires an action object.`);
     }
     nonEmptyString(event.action.id, 'action.id');
+    if (event.action.agentId !== undefined && event.action.agentId !== null) {
+      nonEmptyString(event.action.agentId, 'action.agentId');
+    }
     if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
       throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
     }
@@ -452,6 +455,9 @@ function handleAfterAction(event, options) {
     const reservationId = reservationForAction(state.delegation, event.action.id);
     if (reservationId) {
       let nextDelegation = state.delegation;
+      if (event.action.agentId) {
+        nextDelegation = bindSubagent(nextDelegation, event.action.agentId, reservationId);
+      }
       if (typeof event.action.asyncLaunched === 'boolean') {
         nextDelegation = markReservationAsync(nextDelegation, reservationId, event.action.asyncLaunched);
       }

@@ -42,6 +42,21 @@ function slashDirective(prompt) {
   return `$stop-that-shit${args ? ` ${args}` : ''}`;
 }
 
+function claudeAsyncLaunched(input) {
+  const response = input && input.tool_response;
+  const status = response && typeof response.status === 'string'
+    ? response.status.toLowerCase()
+    : '';
+  if (status === 'async_launched') return true;
+  if (status === 'completed') return false;
+  return readAsyncLaunched(input, input && input.tool_input, response);
+}
+
+function claudeResponseAgentId(input) {
+  const response = input && input.tool_response;
+  return optionalIdentifier(response && response.agentId, response && response.agent_id);
+}
+
 function toControlEvent(input) {
   if (!input || typeof input !== 'object') return null;
   const kind = EVENT_KIND[input.hook_event_name];
@@ -77,7 +92,9 @@ function toControlEvent(input) {
     event.action = {
       id: actionId
     };
-    const asyncLaunched = readAsyncLaunched(input, input.tool_input);
+    const agentId = claudeResponseAgentId(input);
+    if (agentId) event.action.agentId = agentId;
+    const asyncLaunched = claudeAsyncLaunched(input);
     if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
   }
 
@@ -102,8 +119,6 @@ function toControlEvent(input) {
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
     event.agentId = optionalIdentifier(input.agent_id, input.agentId);
-    const reservationId = optionalIdentifier(input.reservation_id, input.reservationId);
-    if (reservationId) event.reservationId = reservationId;
   }
 
   return event;
