@@ -9,7 +9,7 @@ const {
   detectHashIntent,
   extractAffectedPaths
 } = require('./hermes-tool-classifier.cjs');
-const { optionalIdentifier, readAsyncLaunched } = require('./lifecycle-fields.cjs');
+const { optionalIdentifier } = require('./lifecycle-fields.cjs');
 
 const EVENT_KIND = {
   pre_llm_call: 'prompt.submit',
@@ -60,8 +60,6 @@ function toControlEvent(input) {
       cwd: input.cwd,
       unboundedDelegation: false
     };
-    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
-    if (mutability === 'delegate' && asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
     event.action = {
       ...action
     };
@@ -71,11 +69,29 @@ function toControlEvent(input) {
     const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
     if (!actionId) return null;
     event.action = { id: String(actionId) };
-    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
-    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
+    event.action.lifecycle = 'unknown';
+    if (input.tool_name === 'delegate_task') {
+      let result = extra.result;
+      if (typeof result === 'string') { try { result = JSON.parse(result); } catch { result = null; } }
+      if (result && result.status === 'dispatched' && result.mode === 'background') {
+        event.action.lifecycle = 'running';
+        if (Array.isArray(result.subagent_ids)) {
+          event.action.agentAliases = result.subagent_ids.filter(id => typeof id === 'string' && id);
+        }
+      } else if (result && Array.isArray(result.results) && result.results.length
+          && result.results.every(entry => entry && ['completed', 'error'].includes(entry.status))) {
+        event.action.lifecycle = 'joined';
+      }
+    }
   }
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
+    // timeout/interrupted hooks can fire while a worker is still alive.
+    if (kind === 'subagent.stop' && !['completed', 'error'].includes(extra.child_status)) return null;
+    if (kind === 'subagent.start') {
+      const alias = optionalIdentifier(extra.child_subagent_id, input.child_subagent_id);
+      if (alias) event.agentAlias = alias;
+    }
     const agentId = extra.child_session_id
       || input.child_session_id
       || extra.child_subagent_id
@@ -83,8 +99,6 @@ function toControlEvent(input) {
       || null;
     const normalizedAgentId = optionalIdentifier(agentId);
     if (normalizedAgentId) event.agentId = normalizedAgentId;
-    const reservationId = optionalIdentifier(extra.reservation_id, extra.reservationId);
-    if (reservationId) event.reservationId = reservationId;
   }
 
   return event;

@@ -159,18 +159,18 @@ test('delegation reservation is released on tool_result', (t) => {
     type: 'tool_call',
     toolCallId,
     toolName: 'subagent',
-    input: { agent: 'scout', task, async_launched: false }
+    input: { agent: 'scout', task }
   });
   assert.equal(pi.handlers.get('tool_call')(delegation('subagent-1', 'inspect'), ctx), undefined);
   pi.handlers.get('tool_result')({
     type: 'tool_result', toolCallId: 'subagent-1', toolName: 'subagent', input: {},
-    content: [], isError: false
+    content: [], isError: false, details: { mode: 'single', results: [] }
   }, ctx);
 
   assert.equal(pi.handlers.get('tool_call')(delegation('subagent-2', 'inspect again'), ctx), undefined);
 });
 
-test('Pi session shutdown clears active reservations', (t) => {
+test('Pi session shutdown alone cannot prove custom children stopped', (t) => {
   const dataDir = workspace(t);
   const pi = fakePi();
   const ctx = fakeContext('shutdown-session');
@@ -182,7 +182,9 @@ test('Pi session shutdown clears active reservations', (t) => {
   }, ctx);
   pi.handlers.get('session_shutdown')({ type: 'session_shutdown', reason: 'quit' }, ctx);
   const state = readState('shutdown-session', dataDir);
-  assert.deepEqual(state.delegation.reservations, {});
+  assert.equal(Object.keys(state.delegation.reservations).length, 1);
+  assert.equal(pi.handlers.get('tool_call')({ type: 'tool_call', toolCallId: 'subagent-2', toolName: 'subagent',
+    input: { agent: 'scout', task: 'inspect again' } }, ctx).block, true);
 });
 
 test('Pi ignores tool_result events without toolCallId without reporting an adapter failure', (t) => {

@@ -15,7 +15,7 @@ const {
   detectHashIntent,
   extractAffectedPaths
 } = __require("src/adapters/hermes-tool-classifier.cjs");
-const { optionalIdentifier, readAsyncLaunched } = __require("src/adapters/lifecycle-fields.cjs");
+const { optionalIdentifier } = __require("src/adapters/lifecycle-fields.cjs");
 
 const EVENT_KIND = {
   pre_llm_call: 'prompt.submit',
@@ -66,8 +66,6 @@ function toControlEvent(input) {
       cwd: input.cwd,
       unboundedDelegation: false
     };
-    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
-    if (mutability === 'delegate' && asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
     event.action = {
       ...action
     };
@@ -77,11 +75,29 @@ function toControlEvent(input) {
     const actionId = optionalIdentifier(input.tool_call_id, extra.tool_call_id);
     if (!actionId) return null;
     event.action = { id: String(actionId) };
-    const asyncLaunched = readAsyncLaunched(input, input.tool_input, extra);
-    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
+    event.action.lifecycle = 'unknown';
+    if (input.tool_name === 'delegate_task') {
+      let result = extra.result;
+      if (typeof result === 'string') { try { result = JSON.parse(result); } catch { result = null; } }
+      if (result && result.status === 'dispatched' && result.mode === 'background') {
+        event.action.lifecycle = 'running';
+        if (Array.isArray(result.subagent_ids)) {
+          event.action.agentAliases = result.subagent_ids.filter(id => typeof id === 'string' && id);
+        }
+      } else if (result && Array.isArray(result.results) && result.results.length
+          && result.results.every(entry => entry && ['completed', 'error'].includes(entry.status))) {
+        event.action.lifecycle = 'joined';
+      }
+    }
   }
 
   if (kind === 'subagent.start' || kind === 'subagent.stop') {
+    // timeout/interrupted hooks can fire while a worker is still alive.
+    if (kind === 'subagent.stop' && !['completed', 'error'].includes(extra.child_status)) return null;
+    if (kind === 'subagent.start') {
+      const alias = optionalIdentifier(extra.child_subagent_id, input.child_subagent_id);
+      if (alias) event.agentAlias = alias;
+    }
     const agentId = extra.child_session_id
       || input.child_session_id
       || extra.child_subagent_id
@@ -89,8 +105,6 @@ function toControlEvent(input) {
       || null;
     const normalizedAgentId = optionalIdentifier(agentId);
     if (normalizedAgentId) event.agentId = normalizedAgentId;
-    const reservationId = optionalIdentifier(extra.reservation_id, extra.reservationId);
-    if (reservationId) event.reservationId = reservationId;
   }
 
   return event;
@@ -122,7 +136,7 @@ module.exports = {
 "src/control-protocol.cjs": function(module, exports, __require) {
 'use strict';
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const EVENT_KINDS = new Set([
   'session.start',
   'prompt.submit',
@@ -144,7 +158,7 @@ function assertControlEvent(event) {
   if (!event || typeof event !== 'object') {
     throw new TypeError('ControlEvent must be an object.');
   }
-  if (event.protocolVersion !== PROTOCOL_VERSION) {
+  if (![1, PROTOCOL_VERSION].includes(event.protocolVersion)) {
     throw new TypeError(`Unsupported ControlEvent protocolVersion: ${event.protocolVersion}.`);
   }
   if (!EVENT_KINDS.has(event.kind)) {
@@ -163,10 +177,10 @@ function assertControlEvent(event) {
     if (!MUTABILITIES.has(event.action.mutability)) {
       throw new TypeError(`Unsupported action mutability: ${event.action.mutability}.`);
     }
-    if (event.action.mutability === 'delegate') nonEmptyString(event.action.id, 'action.id');
+    if (event.action.mutability === 'delegate' || event.action.delegationLifecycleUnproven) nonEmptyString(event.action.id, 'action.id');
     if (
       event.action.delegationCount !== undefined
-      && (!Number.isInteger(event.action.delegationCount) || event.action.delegationCount < 0)
+      && (!Number.isSafeInteger(event.action.delegationCount) || event.action.delegationCount < 0)
     ) {
       throw new TypeError('ControlEvent action.delegationCount must be a non-negative integer.');
     }
@@ -182,16 +196,33 @@ function assertControlEvent(event) {
     if (event.action.agentId !== undefined && event.action.agentId !== null) {
       nonEmptyString(event.action.agentId, 'action.agentId');
     }
+    for (const field of ['agentAliases', 'endedAgentIds']) {
+      if (event.action[field] !== undefined) {
+        if (!Array.isArray(event.action[field])) throw new TypeError(`action.${field} must be an array.`);
+        for (const id of event.action[field]) nonEmptyString(id, `action.${field}`);
+      }
+    }
+    if (event.action.lifecycle !== undefined && !['running', 'joined', 'not_started', 'unknown'].includes(event.action.lifecycle)) {
+      throw new TypeError('Unsupported action.lifecycle fact.');
+    }
+    if (event.action.completed !== undefined && typeof event.action.completed !== 'boolean') {
+      throw new TypeError('ControlEvent action.completed must be a boolean when provided.');
+    }
     if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
       throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
     }
   }
   if (event.kind === 'subagent.start' || event.kind === 'subagent.stop') {
-    for (const field of ['agentId', 'reservationId']) {
+    for (const field of ['agentId', 'agentAlias', 'reservationId']) {
       if (event[field] !== undefined && event[field] !== null) nonEmptyString(event[field], field);
     }
   }
 
+  if (event.allDelegationsStopped !== undefined && typeof event.allDelegationsStopped !== 'boolean') throw new TypeError('allDelegationsStopped must be boolean.');
+  if (event.sourceSessionId !== undefined) nonEmptyString(event.sourceSessionId, 'sourceSessionId');
+  if (event.action && event.action.completionScope !== undefined && !['call', 'children'].includes(event.action.completionScope)) {
+    throw new TypeError('Unsupported action.completionScope.');
+  }
   return event;
 }
 
@@ -207,22 +238,12 @@ module.exports = {
 'use strict';
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = __require("src/contracts.cjs");
-const { assertControlEvent } = __require("src/control-protocol.cjs");
-const {
-  acceptedActionCount,
-  activeDelegationCount,
-  bindSubagent,
-  clearDelegations,
-  markReservationAsync,
-  releaseReservation,
-  releaseSubagent,
-  reserveDelegation,
-  reservationForAction
-} = __require("src/delegation-state.cjs");
+const { assertControlEvent, PROTOCOL_VERSION } = __require("src/control-protocol.cjs");
+const { inspectDelegation, applyDelegationFact } = __require("src/delegation-state.cjs");
 const { decide } = __require("src/decision.cjs");
 const { readRuntime, recordDecision } = __require("src/runtime-audit.cjs");
 const { recordAnnotation } = __require("src/runtime-annotations.cjs");
-const { readState, withSessionLock, writeState } = __require("src/state.cjs");
+const { readState, updateSession } = __require("src/state.cjs");
 
 function none() {
   return { kind: 'none' };
@@ -258,7 +279,7 @@ function contractContext(contract, delegation = {}, phase = 'active', directiveW
 
   return [
     directiveWarning && directiveWarning.message ? `Warning: ${directiveWarning.message}` : null,
-    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${activeDelegationCount(delegation)}/${agentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
+    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${inspectDelegation(delegation).reservedUpperBound}/${agentLimit} reserved${inspectDelegation(delegation).unresolvedReasons.length ? "; count unproven" : ""}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
     'Stop Ladder: Is it requested? Is it necessary? What reachable evidence proves that? Would omission fail the current acceptance?',
     'Report real findings even when implementation is not authorized.',
     'Before expanding scope, name reachable evidence, failure if omitted, and the fact that changes the next action.',
@@ -349,8 +370,7 @@ function handleRuntimeCommand(command, event, state, options) {
   ].join('\n'));
 }
 
-function handlePrompt(event, options) {
-  const state = readState(event.sessionId, options.dataDir);
+function handlePrompt(event, state, options) {
   const command = runtimeCommand(event.prompt);
   if (command) return handleRuntimeCommand(command, event, state, options);
   const parsed = parseContractPrompt(event.prompt, state.contract);
@@ -358,7 +378,6 @@ function handlePrompt(event, options) {
     state.directiveError = parsed.error;
     state.directiveWarning = null;
     state.lastPromptContext = null;
-    writeState(event.sessionId, state, options.dataDir);
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
   }
   state.contract = parsed.contract;
@@ -367,18 +386,21 @@ function handlePrompt(event, options) {
   const promptContext = contractContext(state.contract, state.delegation, 'active', state.directiveWarning);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
-  writeState(event.sessionId, state, options.dataDir);
   return repeatedContext ? none() : context(promptContext);
 }
 
 function handleBeforeAction(event, options) {
-  const evaluate = () => {
-    const state = readState(event.sessionId, options.dataDir);
+  const legacyDelegationProtocol = event.protocolVersion < PROTOCOL_VERSION
+    && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
+  const changesDelegation = event.action.mutability === 'delegate'
+    || event.action.delegationLifecycleUnproven || legacyDelegationProtocol;
+  const evaluate = (state) => {
     const delegationCount = event.action.mutability === 'delegate'
       ? (Number.isInteger(event.action.delegationCount) ? event.action.delegationCount : 1)
       : 0;
     const action = {
       mutability: event.action.mutability,
+      legacyDelegationProtocol,
       delegationCount,
       hashIntent: Boolean(event.action.hashIntent),
       reachability: event.action.reachability,
@@ -387,45 +409,30 @@ function handleBeforeAction(event, options) {
       cwd: event.action.cwd,
       dependencyIntent: Boolean(event.action.dependencyIntent),
       unboundedDelegation: Boolean(event.action.unboundedDelegation),
-      asyncLaunched: event.action.mutability === 'delegate' && typeof event.action.asyncLaunched === 'boolean'
-        ? event.action.asyncLaunched
-        : null
+      delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
     };
-    const existingReservation = event.action.mutability === 'delegate'
-      ? reservationForAction(state.delegation, event.action.id)
-      : null;
-    const acceptedCount = event.action.mutability === 'delegate'
-      ? acceptedActionCount(state.delegation, event.action.id)
-      : null;
-    action.duplicateActionConflict = acceptedCount !== null && acceptedCount !== delegationCount;
-    action.alreadyReserved = !action.duplicateActionConflict
-      && (Boolean(existingReservation) || acceptedCount === delegationCount);
-    const result = decide({ contract: state.contract, action, state });
-
-    if (event.action.mutability === 'delegate' && result.outcome === 'allow') {
-      const actionId = event.action.id;
-      if (!existingReservation) {
-        const reservationId = `reservation:${actionId}`;
-        state.delegation = reserveDelegation(state.delegation, reservationId, actionId, delegationCount);
-        state.delegation = markReservationAsync(state.delegation, reservationId, action.asyncLaunched);
-        writeState(event.sessionId, state, options.dataDir);
-      } else if (typeof action.asyncLaunched === 'boolean') {
-        const nextDelegation = markReservationAsync(state.delegation, existingReservation, action.asyncLaunched);
-        if (nextDelegation !== state.delegation) {
-          state.delegation = nextDelegation;
-          writeState(event.sessionId, state, options.dataDir);
-        }
-      }
+    const summary = inspectDelegation(state.delegation, { id: event.action.id, delegationCount });
+    action.duplicateActionConflict = summary.duplicateActionConflict;
+    action.alreadyReserved = summary.alreadyReserved;
+    const result = decide({ contract: state.contract, action, delegation: summary, state });
+    if (changesDelegation && ['allow', 'report_and_defer'].includes(result.outcome)) {
+      state.delegation = applyDelegationFact(state.delegation, {
+        kind: 'accepted', id: event.action.id || 'legacy:unidentified', count: delegationCount,
+        completionScope: event.action.completionScope,
+        uncertainty: legacyDelegationProtocol ? 'legacy_protocol'
+          : action.unboundedDelegation ? 'unbounded_execution'
+          : action.delegationLifecycleUnproven ? 'unversioned_resume' : null
+      });
     }
     return { state, result };
   };
 
   // Separate host processes can issue independent agent launches close together.
-  // Serialize only delegation reservations so both limits remain real across
-  // separate Hook processes without adding locks to the common fast path.
-  const { state, result } = event.action.mutability === 'delegate'
-    ? withSessionLock(event.sessionId, options.dataDir, evaluate)
-    : evaluate();
+  // Serialize delegation reservations across Hook processes. Prompt updates
+  // and completion handlers use the same lock; pure reads stay unlocked.
+  const { state, result } = changesDelegation
+    ? updateSession(event.sessionId, options.dataDir, evaluate)
+    : evaluate(readState(event.sessionId, options.dataDir));
 
   const denied = result.outcome === 'deny_and_explain' || result.outcome === 'require_user_approval';
   const responseOutcome = denied
@@ -450,57 +457,47 @@ function handleBeforeAction(event, options) {
 }
 
 function handleAfterAction(event, options) {
-  return withSessionLock(event.sessionId, options.dataDir, () => {
-    const state = readState(event.sessionId, options.dataDir);
-    const reservationId = reservationForAction(state.delegation, event.action.id);
-    if (reservationId) {
-      let nextDelegation = state.delegation;
-      if (event.action.agentId) {
-        nextDelegation = bindSubagent(nextDelegation, event.action.agentId, reservationId);
-      }
-      if (typeof event.action.asyncLaunched === 'boolean') {
-        nextDelegation = markReservationAsync(nextDelegation, reservationId, event.action.asyncLaunched);
-      }
-      const reservation = nextDelegation.reservations[reservationId];
-      if (reservation && reservation.asyncLaunched === false) {
-        nextDelegation = releaseReservation(nextDelegation, reservationId);
-      }
-      if (nextDelegation !== state.delegation) {
-        state.delegation = nextDelegation;
-        writeState(event.sessionId, state, options.dataDir);
-      }
+  return updateSession(event.sessionId, options.dataDir, (state) => {
+    // v1 compatibility only accepts explicit completed evidence. A false async
+    // flag can be a request parameter and never proves that children have joined.
+    const kind = event.action.lifecycle || (event.action.completed === true ? 'joined'
+      : event.action.asyncLaunched === true ? 'running' : 'unknown');
+    state.delegation = applyDelegationFact(state.delegation, {
+      kind, id: event.action.id, agentId: event.action.agentId, agentAliases: event.action.agentAliases
+    });
+    for (const agentId of event.action.endedAgentIds || []) {
+      state.delegation = applyDelegationFact(state.delegation, { kind: 'child_stopped', agentId });
     }
     return none();
   });
 }
 
 function handleLifecycleContext(event, options) {
-  const update = () => {
-    const state = readState(event.sessionId, options.dataDir);
-    let nextDelegation = state.delegation;
-    if (event.kind === 'subagent.start' && event.agentId) {
-      nextDelegation = bindSubagent(state.delegation, event.agentId, event.reservationId);
-    } else if (event.kind === 'subagent.stop' && event.agentId) {
-      nextDelegation = releaseSubagent(state.delegation, event.agentId);
-    } else if (event.kind === 'session.end') {
-      nextDelegation = clearDelegations(state.delegation);
-    }
-    if (nextDelegation !== state.delegation) {
-      state.delegation = nextDelegation;
-      writeState(event.sessionId, state, options.dataDir);
-    }
-    return context(contractContext(state.contract, nextDelegation, 'active', state.directiveWarning));
+  // v1 adapters mapped stop attempts to terminal events. They cannot release
+  // reservations made by a v2 adapter in a mixed installation.
+  if (event.protocolVersion < PROTOCOL_VERSION && event.kind !== 'session.start') return none();
+  const update = (state) => {
+    const fact = event.kind === 'subagent.start'
+      ? { kind: 'child_started', agentId: event.agentId, agentAlias: event.agentAlias, reservationId: event.reservationId }
+      : event.kind === 'subagent.stop' ? { kind: 'child_stopped', agentId: event.agentId }
+      : { kind: event.allDelegationsStopped === true ? 'all_stopped' : 'unknown' };
+    state.delegation = applyDelegationFact(state.delegation, fact);
+    return context(contractContext(state.contract, state.delegation, 'active', state.directiveWarning));
   };
-  return ['subagent.start', 'subagent.stop', 'session.end'].includes(event.kind)
-    ? withSessionLock(event.sessionId, options.dataDir, update)
-    : update();
+  return event.kind === 'session.start' ? update(readState(event.sessionId, options.dataDir))
+    : updateSession(event.sessionId, options.dataDir, update);
 }
 
 function handleControlEvent(rawEvent, options = {}) {
-  const event = assertControlEvent(rawEvent);
+  let event = assertControlEvent(rawEvent);
+  if (event.action && event.action.id && event.sourceSessionId && event.sourceSessionId !== event.sessionId) {
+    event = { ...event, action: { ...event.action, id: JSON.stringify([event.sourceSessionId, event.action.id]) } };
+  }
   switch (event.kind) {
     case 'prompt.submit':
-      return handlePrompt(event, options);
+      return runtimeCommand(event.prompt)
+        ? handlePrompt(event, readState(event.sessionId, options.dataDir), options)
+        : updateSession(event.sessionId, options.dataDir, state => handlePrompt(event, state, options));
     case 'action.before':
       return handleBeforeAction(event, options);
     case 'action.after':
@@ -903,7 +900,86 @@ function reservationForAction(state, actionId) {
   return null;
 }
 
+// Callers consume this summary; reservation layout and deduplication stay here.
+function inspectDelegation(state, intent = {}) {
+  const acceptedCount = acceptedActionCount(state, intent.id);
+  const count = intent.delegationCount ?? 0;
+  return {
+    reservedUpperBound: activeDelegationCount(state),
+    unresolvedReasons: [...new Set(Object.values(state && state.unresolved || {}))],
+    unknownResults: Object.values(reservationsOf(state)).filter(value => value.resultUnknown).length,
+    alreadyReserved: acceptedCount !== null && acceptedCount === count,
+    duplicateActionConflict: acceptedCount !== null && acceptedCount !== count
+  };
+}
+
+function bindReportedAliases(state) {
+  let next = state;
+  for (const [id, reservation] of Object.entries(reservationsOf(state))) {
+    if (reservation.completionScope === 'call') continue;
+    for (const alias of reservation.reportedAliases || []) {
+      const agentId = state.agentAliases && state.agentAliases[alias];
+      if (agentId) next = bindSubagent(next, agentId, id);
+    }
+  }
+  return next;
+}
+
+function applyDelegationFact(state, fact) {
+  const actionId = fact.id;
+  const reservationId = reservationForAction(state, actionId);
+  if (fact.kind === 'accepted') {
+    if (acceptedActionCount(state, actionId) !== null) return state;
+    const id = `reservation:${actionId}`;
+    let next = reserveDelegation(state, id, actionId, fact.count);
+    next = { ...next, reservations: { ...next.reservations,
+      [id]: { ...next.reservations[id], completionScope: fact.completionScope || 'children' } } };
+    if (fact.uncertainty) next = { ...next, unresolved: { ...next.unresolved, [actionId]: fact.uncertainty } };
+    return next;
+  }
+  if (fact.kind === 'joined' || fact.kind === 'not_started') {
+    if (!reservationId && !Object.prototype.hasOwnProperty.call(state.unresolved || {}, actionId)) return state;
+    // A late denial cannot contradict an already observed execution.
+    const reservation = reservationsOf(state)[reservationId];
+    if (fact.kind === 'not_started' && reservation && (reservation.observedRunning || reservation.agentIds.length)) return state;
+    const unresolved = { ...state.unresolved };
+    delete unresolved[actionId];
+    return { ...releaseReservation(state, reservationId), unresolved };
+  }
+  if (fact.kind === 'running' || fact.kind === 'unknown') {
+    if (!reservationId) return state;
+    let next = state;
+    if (fact.agentId && state.reservations[reservationId].completionScope !== 'call') {
+      next = bindSubagent(next, fact.agentId, reservationId);
+    }
+    if (fact.agentAliases && next.reservations[reservationId]) {
+      next = { ...next, reservations: { ...next.reservations, [reservationId]: {
+        ...next.reservations[reservationId], reportedAliases: [...new Set(fact.agentAliases)] } } };
+      next = bindReportedAliases(next);
+    }
+    const reservation = next.reservations[reservationId];
+    if (!reservation) return next;
+    return { ...next, reservations: { ...next.reservations,
+      [reservationId]: { ...reservation,
+        observedRunning: reservation.observedRunning || fact.kind === 'running',
+        resultUnknown: fact.kind === 'unknown' } } };
+  }
+  if (fact.kind === 'child_started') {
+    if (fact.agentAlias && fact.agentId) {
+      state = bindReportedAliases({ ...state, agentAliases: { ...state.agentAliases, [fact.agentAlias]: fact.agentId } });
+    }
+    const reservation = reservationsOf(state)[fact.reservationId];
+    if (reservation && reservation.completionScope === 'call') return state;
+    return bindSubagent(state, fact.agentId, fact.reservationId);
+  }
+  if (fact.kind === 'child_stopped') return releaseSubagent(state, fact.agentId);
+  if (fact.kind === 'all_stopped') return { ...clearDelegations(state), unresolved: {} };
+  return state;
+}
+
 module.exports = {
+  inspectDelegation,
+  applyDelegationFact,
   acceptedActionCount,
   activeDelegationCount,
   bindSubagent,
@@ -921,7 +997,7 @@ module.exports = {
 
 const nodePath = require('node:path');
 const { DEFAULT_AGENT_LIMIT } = __require("src/contracts.cjs");
-const { activeDelegationCount } = __require("src/delegation-state.cjs");
+const { inspectDelegation } = __require("src/delegation-state.cjs");
 
 function decision(outcome, family, reasonCode, explanation, nextStep) {
   return { outcome, family, reasonCode, explanation, nextStep };
@@ -963,7 +1039,7 @@ function pathAllowed(path, allowedPaths, cwd) {
   });
 }
 
-function decide({ contract, action, state = {} }) {
+function decide({ contract, action, state = {}, delegation = inspectDelegation(state.delegation) }) {
   const mode = contract.mode || 'unconfirmed';
   const level = contract.level || 'watch';
 
@@ -982,6 +1058,19 @@ function decide({ contract, action, state = {} }) {
 
   if (level === 'off' || mode === 'unconfirmed') {
     return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
+  }
+
+  const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
+    ? contract.agentBudget
+    : DEFAULT_AGENT_LIMIT;
+  if (action.legacyDelegationProtocol && agentBudget < DEFAULT_AGENT_LIMIT) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'LIFECYCLE_PROTOCOL_REQUIRED',
+      'This adapter uses the legacy lifecycle protocol, which cannot prove that delegation and resume actions obey the finite limit.',
+      'Update the host adapter and runtime together before using agents=N. Ordinary read and write actions remain available.'
+    );
   }
 
   const nonMutatingMode = ['answer', 'review', 'monitor'].includes(mode);
@@ -1080,17 +1169,33 @@ function decide({ contract, action, state = {} }) {
     );
   }
 
-  const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
-    ? contract.agentBudget
-    : DEFAULT_AGENT_LIMIT;
-  const activeAgents = activeDelegationCount(state.delegation);
+  const activeAgents = delegation.reservedUpperBound;
+  if (action.mutability === 'delegate' && delegation.unresolvedReasons.length > 0
+      && agentBudget < DEFAULT_AGENT_LIMIT) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'DELEGATION_STATE_UNPROVEN',
+      `Earlier permitted activity has no proven bound: ${delegation.unresolvedReasons.join(', ')}.`,
+      'Wait for confirmed completion of the affected call. If the host cannot identify its completion, use a new session for a finite limit.'
+    );
+  }
+  if (action.delegationLifecycleUnproven && agentBudget < DEFAULT_AGENT_LIMIT) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'DELEGATION_LIFECYCLE_UNPROVEN',
+      'This action can restart an existing agent, but the host does not identify each run in its completion events.',
+      'Use a new delegation call so agents=N can track its completion. Messaging and resuming remain available without a finite agent limit.'
+    );
+  }
   if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > agentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
       'AGENT_BUDGET_EXHAUSTED',
-      `The session allows ${agentBudget} concurrently active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
-      'Wait for the current delegation to complete or increase agents=N in a corrected directive.'
+      `The session allows ${agentBudget} concurrently active subagent(s), with ${activeAgents} units reserved, and this action requires ${delegationCount}.`,
+      delegation.unknownResults ? 'A tool returned without proof that its child work ended. Collect a supported completion result before reusing its reserved capacity.' : 'Wait for the current delegation to complete or increase agents=N in a corrected directive.'
     );
   }
 
@@ -1118,7 +1223,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const packageJson = __require("package.json");
 const { PROTOCOL_VERSION } = __require("src/control-protocol.cjs");
-const { activeDelegationCount } = __require("src/delegation-state.cjs");
+const { inspectDelegation } = __require("src/delegation-state.cjs");
 const { readAnnotations } = __require("src/runtime-annotations.cjs");
 const { appendJsonl, readJsonl, runtimeRoot } = __require("src/runtime-storage.cjs");
 const { sessionKey } = __require("src/state.cjs");
@@ -1163,7 +1268,8 @@ function recordDecision(facts, options = {}) {
       mode: String(contract.mode || 'unconfirmed'),
       level: String(contract.level || 'watch'),
       agentBudget: Number.isSafeInteger(contract.agentBudget) ? contract.agentBudget : Number.MAX_SAFE_INTEGER,
-      activeAgents: activeDelegationCount(delegation),
+      reservedUpperBound: inspectDelegation(delegation).reservedUpperBound,
+      countUnproven: inspectDelegation(delegation).unresolvedReasons.length > 0,
       hashPolicy: String(contract.hashPolicy || 'deny'),
       dependencyPolicy: String(contract.dependencyPolicy || 'ask'),
       allowedPathCount: Array.isArray(contract.allowedPaths) ? contract.allowedPaths.length : 0
@@ -1294,7 +1400,7 @@ module.exports = {
     "pretest": "npm run schema:check",
     "hermes:build": "node scripts/build-hermes-plugin.cjs",
     "hermes:check": "node scripts/build-hermes-plugin.cjs --check",
-    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
+    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/delegation-lifecycle.test.cjs test/delegation-facts.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",
@@ -1414,7 +1520,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { defaultContract } = __require("src/contracts.cjs");
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 function dataRoot(override) {
   return override || process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA || path.join(os.tmpdir(), 'stop-that-shit-dev');
@@ -1436,6 +1542,7 @@ function freshState() {
       reservations: {},
       agentIdsSeen: [],
       stoppedAgentIds: [],
+      unresolved: {},
       acceptedActions: {}
     },
     directiveWarning: null,
@@ -1472,6 +1579,10 @@ function normalizeDelegation(value) {
     for (const [reservationId, reservation] of Object.entries(source.reservations)) {
       if (!reservation || typeof reservation !== 'object') continue;
       reservations[reservationId] = {
+        reportedAliases: Array.isArray(reservation.reportedAliases) ? reservation.reportedAliases.filter(value => typeof value === 'string' && value) : [],
+        completionScope: reservation.completionScope === 'call' ? 'call' : 'children',
+        observedRunning: reservation.observedRunning === true || reservation.asyncLaunched === true,
+        resultUnknown: reservation.resultUnknown === true,
         actionId: typeof reservation.actionId === 'string' ? reservation.actionId : '',
         asyncLaunched: typeof reservation.asyncLaunched === 'boolean' ? reservation.asyncLaunched : null,
         pendingCount: safeCount(reservation.pendingCount),
@@ -1498,7 +1609,9 @@ function normalizeDelegation(value) {
     stoppedAgentIds: Array.isArray(source.stoppedAgentIds)
       ? [...new Set(source.stoppedAgentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
       : [],
-    acceptedActions
+    acceptedActions,
+    agentAliases: Object.fromEntries(Object.entries(source.agentAliases || {}).filter(([alias, id]) => alias && typeof id === 'string' && id)),
+    unresolved: Object.fromEntries(Object.entries(source.unresolved || {}).filter(([key, reason]) => key && typeof reason === 'string' && reason))
   };
 }
 
@@ -1515,6 +1628,12 @@ function normalizeState(parsed) {
   delete contract.directiveWarning;
   delete contract.directiveError;
   const delegation = normalizeDelegation(source.delegation);
+  if (source.delegationLifecycleUnproven === true) delegation.unresolved['legacy:unproven'] = 'legacy_history_unverified';
+  // Older versions could erase running work or omit it from the ledger. Even
+  // an empty persisted ledger cannot establish a clean execution history.
+  if (source.schemaVersion === undefined || source.schemaVersion < CURRENT_SCHEMA_VERSION) {
+    delegation.unresolved['legacy:history'] = 'legacy_history_unverified';
+  }
   const directiveWarning = source.directiveWarning && typeof source.directiveWarning === 'object'
     && source.directiveWarning.code !== 'DEPRECATED_AGENT_DIRECTIVE'
     ? source.directiveWarning
@@ -1553,31 +1672,9 @@ function readState(sessionId, override) {
   const file = statePath(sessionId, override);
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const normalized = normalizeState(parsed);
-    if (!parsed || typeof parsed !== 'object'
-      || parsed.schemaVersion !== CURRENT_SCHEMA_VERSION
-      || !parsed.contract || typeof parsed.contract !== 'object'
-      || !Object.prototype.hasOwnProperty.call(parsed.contract, 'agentBudget')
-      || !validAgentBudget(parsed.contract.agentBudget)
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'totalAgentBudget')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'concurrentAgentBudget')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'agentsUsed')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveWarning')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveError')
-      || !parsed.delegation || typeof parsed.delegation !== 'object'
-      || Object.prototype.hasOwnProperty.call(parsed.delegation, 'totalAgentsUsed')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'reservations')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions')
-      || parsed.directiveWarning?.code === 'DEPRECATED_AGENT_DIRECTIVE'
-      || parsed.directiveError?.code === 'LEGACY_AGENT_DIRECTIVE'
-      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning')
-      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveError')
-      || !Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext')) {
-      writeState(sessionId, normalized, override);
-    }
-    return normalized;
+    // Reads may run without the session lock. Normalize in memory only;
+    // the next locked mutation persists the current schema and latest ledger.
+    return normalizeState(parsed);
   } catch (error) {
     if (error && (error.code === 'ENOENT' || error.name === 'SyntaxError')) return freshState();
     throw error;
@@ -1660,7 +1757,17 @@ function withSessionLock(sessionId, override, fn, options) {
   }
 }
 
+function updateSession(sessionId, override, update) {
+  return withSessionLock(sessionId, override, () => {
+    const state = readState(sessionId, override);
+    const result = update(state);
+    writeState(sessionId, state, override);
+    return result;
+  });
+}
+
 module.exports = {
+  updateSession,
   acquireSessionLock,
   dataRoot,
   freshState,
@@ -1703,7 +1810,14 @@ function isHermesDelegationControl(toolName, toolInput) {
 function countHermesDelegation(toolName, toolInput) {
   if (toolName !== 'delegate_task' || isHermesDelegationControl(toolName, toolInput)) return 0;
   const input = toolInput && typeof toolInput === 'object' ? toolInput : {};
-  if (Array.isArray(input.tasks)) return input.tasks.length;
+  let tasks = input.tasks;
+  // Match Hermes' task-list normalization: recover only JSON arrays; an empty
+  // array falls back to goal. Invalid strings are rejected before any spawn.
+  if (typeof tasks === 'string') {
+    try { tasks = JSON.parse(tasks); } catch { return 0; }
+    if (!Array.isArray(tasks)) return 0;
+  }
+  if (Array.isArray(tasks) && tasks.length) return tasks.length;
   if (typeof input.goal === 'string' && input.goal.trim()) return 1;
   return 0;
 }
@@ -2076,7 +2190,7 @@ __modules["package.json"] = function(module) { module.exports = {
     "pretest": "npm run schema:check",
     "hermes:build": "node scripts/build-hermes-plugin.cjs",
     "hermes:check": "node scripts/build-hermes-plugin.cjs --check",
-    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
+    "test": "node --test test/case-bundle.test.cjs test/claude-adapter.test.cjs test/claude-plugin.test.cjs test/contracts.test.cjs test/control-protocol.test.cjs test/decision.test.cjs test/delegation-state.test.cjs test/delegation-lifecycle.test.cjs test/delegation-facts.test.cjs test/hermes-adapter.test.cjs test/hermes-hook.test.cjs test/hermes-plugin-package.test.cjs test/hooks.test.cjs test/opencode-adapter.test.cjs test/opencode-plugin.test.cjs test/opencode-smoke.test.cjs test/paired-eval.test.cjs test/pi-adapter.test.cjs test/pi-extension.test.cjs test/pi-package.test.cjs test/plugin.test.cjs test/runtime-audit.test.cjs test/sts-cli.test.cjs test/stss-skill.test.cjs",
     "sts": "node scripts/sts.cjs",
     "eval": "node scripts/evaluate-cases.cjs",
     "eval:selftest": "node --test test/case-bundle.test.cjs test/paired-eval.test.cjs",

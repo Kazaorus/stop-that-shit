@@ -2,17 +2,32 @@
 
 ## Unreleased
 
+- Centralized delegation facts, reservation transitions, and per-call unresolved
+  activity. Confirmed terminal evidence releases the corresponding call;
+  unknown bounded results retain only their original reserved capacity.
+- Added explicit Claude auto-denial recovery, OpenCode result-based accounting,
+  Pi whole-chain completion, Codex spawn/wait correlation, and Hermes dispatch
+  alias correlation. Timeout and stop-attempt signals no longer imply completion.
+- Contract and lifecycle mutations share one session transaction. State reads
+  do not write migrations. Schema 4 preserves old budgets, including zero,
+  and carries forward unresolved legacy history.
+- ControlEvent v2 separates lifecycle facts from request flags. v1 false async
+  flags and stop events are no longer completion evidence. Finite Guard detects
+  old delegation/control adapters. Runtime counts describe reserved
+  upper bounds rather than measured active processes.
+- Hermes task counting now follows the host's JSON-array and empty-batch inputs,
+  closing two paths that could bypass `agents=0`.
+
 - **Active agent limit**：恢复 `agents=N` 作为正式的活动并发上限，默认不限，
   `agents=0` 禁止 delegation，batch 超限整批拒绝；迁移保留旧的有效
   `agentBudget`（包括 `0`）。/ Restored `agents=N` as the formal active
   concurrency limit with an unlimited default, atomic batch rejection, and
   migration that preserves a valid old `agentBudget`, including `0`.
-- **Lifecycle-safe concurrency**：同步完成的 `action.after` 才释放活动槽位；
-  后台或未知状态的 delegation 保留到明确的 stop/session-end 事件，适配器按
-  显式 host ID 关联，不使用 FIFO 猜测。/ Only confirmed synchronous
-  `action.after` events release active slots; background or unknown-status
-  delegations remain reserved until explicit stop/session-end events, and
-  adapters use explicit host IDs rather than FIFO guesses.
+- **Lifecycle-safe concurrency**：整次调用完成或已关联子代理的实际终结才释放名额；
+  后台或未知状态保留到可靠完成证据，停止尝试和会话结束不自动清空。
+  / Confirmed joined results or bound-child termination release capacity.
+  Stop attempts and session-end notifications alone do not clear reservations.
+  Adapters use explicit host IDs rather than FIFO guesses.
 
 ## 0.2.1 — 2026-09-03 (Scoped Guard false-allow fixes / 受限 Guard 误放行修复)
 

@@ -90,7 +90,7 @@ test('runtime audit records delegation count without task input', (t) => {
   const runtime = readRuntime({ sessionId: 'private-session-id' }, { dataDir: directory });
   assert.equal(runtime.events[0].action.delegationCount, 2);
   assert.equal(runtime.events[0].contract.agentBudget, 2);
-  assert.equal(runtime.events[0].contract.activeAgents, 2);
+  assert.equal(runtime.events[0].contract.reservedUpperBound, 2);
   assert.equal('totalAgentBudget' in runtime.events[0].contract, false);
   assert.equal('concurrentAgentBudget' in runtime.events[0].contract, false);
   assert.equal('totalAgentsUsed' in runtime.events[0].contract, false);

@@ -22,11 +22,11 @@ test('Claude plugin manifest uses default skills and hooks surfaces', () => {
   assert.ok(fs.existsSync(path.join(root, 'hooks', 'stop-that-shit-claude.cjs')));
 });
 
-test('Claude hooks register only events every supported host accepts', () => {
+test('Claude hooks register the current lifecycle and permission surface', () => {
   const config = readJson('hooks', 'hooks.json');
   assert.deepEqual(Object.keys(config.hooks).sort(), [
-    'PostToolUse', 'PreToolUse', 'SessionEnd', 'SessionStart',
-    'SubagentStart', 'SubagentStop', 'UserPromptSubmit'
+    'PermissionDenied', 'PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'SessionEnd', 'SessionStart',
+    'SubagentStart', 'UserPromptSubmit'
   ]);
   for (const groups of Object.values(config.hooks)) {
     for (const group of groups) {

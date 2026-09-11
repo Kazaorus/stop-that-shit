@@ -14,7 +14,7 @@ and a metadata-only runtime evidence sidecar.
 
 ```text
 Codex Hook JSON       ----> Codex Adapter --------\
-Claude Hook JSON      ----> Claude Adapter --------+--> ControlEvent v1
+Claude Hook JSON      ----> Claude Adapter --------+--> ControlEvent v2
 OpenCode hooks        ----> OpenCode Adapter -----+          |
 Hermes native Plugin ----> Hermes CLI Adapter ----+          v
 Pi Extension          ----> Pi Adapter -----------/  decision(contract, action)
@@ -39,13 +39,15 @@ Pi Extension          ----> Pi Adapter -----------/  decision(contract, action)
 - `.hermes-plugin/__init__.py` is the only Hermes host entrypoint and bridges
   native Plugin callbacks to the bundled runtime.
 - `pi/stop-that-shit.ts` is the Pi package entrypoint.
-- `src/state.cjs` stores schema-3 per-session contract state and serializes the
+- `src/state.cjs` stores schema-4 per-session contract state and serializes the
   delegation ledger so concurrent Hook processes cannot oversubscribe the active
-  agent limit.
+  agent limit. Contract updates share the reservation lock and cannot overwrite
+  a concurrent launch. Watch-only delegations also reserve slots because the
+  host is allowed to run them.
 - `src/delegation-state.cjs` owns pure reservation transitions. `action.before`
-  reserves active units; only an explicitly synchronous `action.after` releases
-  them. Background or unknown-status work remains reserved until `subagent.stop`
-  or `session.end`. The ledger also keeps accepted action IDs and session-local
+  reserves active units; only a confirmed completion result releases
+  them. Unknown results retain capacity; only confirmed bound-child completion
+  or whole-call joined/not-started facts release it. Session-end alone is not proof. The ledger also keeps accepted action IDs and session-local
   agent stop/start metadata so retries, delayed duplicate starts, and stop-before-
   start events cannot charge or bind a later reservation; this metadata is not
   active usage or runtime audit data.
@@ -55,10 +57,12 @@ Pi Extension          ----> Pi Adapter -----------/  decision(contract, action)
 ## Host event boundaries
 
 Codex maps `UserPromptSubmit` to `prompt.submit`, `PreToolUse` to
-`action.before`, `SubagentStart`/`SubagentStop` to the matching lifecycle
-events, `PostToolUse` to `action.after`, and `SessionEnd` to `session.end`.
-Claude Code uses the same lifecycle mapping with its `Agent` tool's
-`tool_use_id` and `agent_id`; `UserPromptExpansion` remains an optional prompt
+`action.before`, `PostToolUse` to `action.after`, and `SessionEnd` to `session.end`.
+Its spawn result binds a child; confirmed wait results release it. Claude Code
+uses its `Agent` tool's `tool_use_id` and completed result, and injects context
+on `SubagentStart`. Both hosts' `SubagentStop` events are stop attempts and do
+not release reservations. Claude background work without a supported joined
+result stays reserved. `UserPromptExpansion` remains an optional Claude prompt
 surface. Prompt-capable hosts return a native prompt block for invalid legacy
 or malformed directives, while the controller also records the error and
 rejects later delegation until a valid directive arrives.
@@ -86,8 +90,7 @@ agents it can start: one for a non-empty `goal`, or `tasks.length` for a batch.
 The complete count is checked and reserved atomically before the tool runs; an
 insufficient limit rejects the whole batch without consuming any units. A
 confirmed synchronous completion releases active units; background or
-unknown-status calls remain reserved until an explicit subagent stop or session
-end.
+unknown-status calls remain reserved until confirmed bound-child completion or a joined result.
 `action=list`, `action=steer`, and `action=stop` are control operations and
 consume zero budget units.
 
@@ -104,7 +107,7 @@ Pi maps `input`, `before_agent_start`, `tool_call`, `tool_result`, and
 for synchronous tools and carries observation-only context without blocking.
 An explicitly background or otherwise unconfirmed subagent remains reserved
 because the current Pi extension surface has no child-specific stop event;
-`session_shutdown` clears active reservations. Mid-turn contract switches are
+`session_shutdown` alone does not clear these reservations. Mid-turn contract switches are
 not applied to the active turn. The optional official `subagent` tool is budgeted
 at its parent call, while cross-process contract inheritance remains outside the
 supported boundary.
@@ -150,3 +153,15 @@ remains `unobserved`.
 | cron, Kanban worker, ACP, Desktop, or non-dispatcher paths | Not supported or declared | No matching adapter contract or test. |
 
 The Gateway restart is required after plugin lifecycle changes, not on every use.
+
+## Lifecycle transitions
+
+`delegation-state.cjs` hides transitions behind `inspectDelegation` and
+`applyDelegationFact`. Requests specify bounded capacity and completion scope;
+adapters report running, joined, not-started or unknown facts. Per-call
+unresolved activity captures unbounded execution and unversioned resumes.
+A known bounded call with an unknown result retains its existing capacity.
+Only matching terminal evidence clears unresolved activity. Sequential chains
+hold their capacity through individual step stops until the whole call joins.
+All contract and ledger writes use `updateSession`; reads have no write effect.
+See HOST-ADAPTER-CONTRACT.md for actual host evidence and unsupported paths.

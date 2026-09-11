@@ -262,9 +262,12 @@ test('parent and child task launches share one active agent budget', async (t) =
     /AGENT_BUDGET_EXHAUSTED/
   );
 
-  await hooks['tool.execute.before'](
-    { tool: 'task', sessionID: 'child', callID: 'task-continue' },
-    { args: { task_id: 'child', prompt: 'continue', subagent_type: 'explore' } }
+  await assert.rejects(
+    hooks['tool.execute.before'](
+      { tool: 'task', sessionID: 'child', callID: 'task-continue' },
+      { args: { task_id: 'child', prompt: 'continue', subagent_type: 'explore' } }
+    ),
+    /DELEGATION_LIFECYCLE_UNPROVEN/
   );
 });
 
@@ -282,7 +285,7 @@ test('OpenCode task completion releases the delegation reservation', async (t) =
   );
   await hooks['tool.execute.after'](
     { tool: 'task', sessionID: 'root', callID: 'task-1', async_launched: false },
-    { output: 'done' }
+    { output: 'done', metadata: { sessionId: 'completed-child' } }
   );
 
   assert.deepEqual(readState('root', dataDir).delegation.reservations, {});
@@ -297,7 +300,7 @@ test('OpenCode task completion releases the delegation reservation', async (t) =
 test('OpenCode child idle lifecycle releases an explicitly associated background reservation', async (t) => {
   const sessions = {
     root: { id: 'root' },
-    child: { id: 'child', parentID: 'root', reservationId: 'reservation:task-1' }
+    child: { id: 'child', parentID: 'root' }
   };
   const messages = {
     'msg-background': message('root', 'msg-background', '$stop-that-shit change agents=1 -- delegate')
@@ -310,6 +313,10 @@ test('OpenCode child idle lifecycle releases an explicitly associated background
     { args: { prompt: 'inspect', subagent_type: 'explore', async_launched: true } }
   );
   await hooks.event({ event: { type: 'session.created', properties: { info: sessions.child } } });
+  await hooks['tool.execute.after'](
+    { tool: 'task', sessionID: 'root', callID: 'task-1', args: {} },
+    { output: 'launched', metadata: { sessionId: 'child', background: true } }
+  );
   assert.equal(readState('root', dataDir).delegation.reservations['reservation:task-1'].agentIds[0], 'child');
 
   await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'child' } } });
@@ -337,13 +344,13 @@ test('child session deletion preserves root mapping until the child task complet
 
   await hooks['tool.execute.after'](
     { tool: 'task', sessionID: 'child', callID: 'task-child', async_launched: false },
-    { output: 'done' }
+    { output: 'done', metadata: { sessionId: 'completed-child' } }
   );
 
   assert.deepEqual(readState('root', dataDir).delegation.reservations, {});
 });
 
-test('root session deletion emits session.end and clears delegation state', async (t) => {
+test('root session deletion alone does not prove child completion', async (t) => {
   const sessions = { root: { id: 'root' } };
   const messages = {
     'msg-root-end': message('root', 'msg-root-end', '$stop-that-shit change agents=1 -- delegate')
@@ -357,7 +364,7 @@ test('root session deletion emits session.end and clears delegation state', asyn
   );
   await hooks.event({ event: { type: 'session.deleted', properties: { info: sessions.root } } });
 
-  assert.deepEqual(readState('root', dataDir).delegation.reservations, {});
+  assert.equal(readState('root', dataDir).delegation.reservations['reservation:task-root'].pendingCount, 1);
 });
 
 test('watch context is appended after the tool without denying execution', async (t) => {

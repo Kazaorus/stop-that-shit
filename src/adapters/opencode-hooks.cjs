@@ -8,7 +8,7 @@ const {
   detectHashIntent,
   extractAffectedPaths
 } = require('./opencode-tool-classifier.cjs');
-const { optionalIdentifier, readAsyncLaunched } = require('./lifecycle-fields.cjs');
+const { optionalIdentifier } = require('./lifecycle-fields.cjs');
 
 function promptText(parts) {
   if (!Array.isArray(parts)) return '';
@@ -55,27 +55,35 @@ function toActionEvent(input, output, context = {}) {
     dependencyIntent: detectDependencyIntent(toolName, args),
     hashIntent: detectHashIntent(toolName, args)
   };
-  const asyncLaunched = readAsyncLaunched(input, args);
-  if (mutability === 'delegate' && asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
+  if (toolName === 'task' && args && args.task_id) action.delegationLifecycleUnproven = true;
   return {
     protocolVersion: PROTOCOL_VERSION,
     kind: 'action.before',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
+    sourceSessionId: String(input.sessionID),
     host: hostMetadata(input),
     action
   };
 }
 
-function toActionAfterEvent(input, context = {}) {
+function toActionAfterEvent(input, context = {}, output) {
   const actionId = optionalIdentifier(input && input.callID, input && input.callId);
   if (!actionId) return null;
   const action = { id: actionId };
-  const asyncLaunched = readAsyncLaunched(input, input && input.args);
-  if (asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
+  const metadata = output && output.metadata;
+  const taskResult = input.tool === 'task' && output && typeof output.output === 'string'
+    && metadata && typeof metadata.sessionId === 'string' && metadata.sessionId.trim()
+    && (metadata.background === undefined || typeof metadata.background === 'boolean');
+  action.lifecycle = taskResult ? (metadata.background === true ? 'running' : 'joined') : 'unknown';
+  if (taskResult) {
+    action.agentId = metadata.sessionId;
+
+  }
   return {
     protocolVersion: PROTOCOL_VERSION,
     kind: 'action.after',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
+    sourceSessionId: String(input.sessionID),
     host: hostMetadata(input),
     action
   };
@@ -83,15 +91,13 @@ function toActionAfterEvent(input, context = {}) {
 
 function toSubagentStartEvent(input, context = {}) {
   const agentId = optionalIdentifier(input && (input.agentId || input.agent_id || input.childSessionID || input.childSessionId || input.id));
-  const reservationId = optionalIdentifier(input && (input.reservationId || input.reservation_id || input.callID || input.callId));
   if (!agentId) return null;
   return {
     protocolVersion: PROTOCOL_VERSION,
     kind: 'subagent.start',
     sessionId: String(context.controlSessionID || input && input.sessionID || ''),
     host: hostMetadata(input),
-    agentId,
-    ...(reservationId ? { reservationId } : {})
+    agentId
   };
 }
 
@@ -130,7 +136,7 @@ function handleOpenCodeTool(input, output, context = {}, options = {}) {
 }
 
 function handleOpenCodeToolAfter(input, output, context = {}, options = {}) {
-  const event = toActionAfterEvent(input, context);
+  const event = toActionAfterEvent(input, context, output);
   return event ? handleControlEvent(event, controllerOptions(options)) : { kind: 'none' };
 }
 

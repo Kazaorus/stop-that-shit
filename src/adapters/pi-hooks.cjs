@@ -54,10 +54,9 @@ function toActionEvent(input, context = {}) {
     dependencyIntent: detectDependencyIntent(toolName, toolInput),
     hashIntent: detectHashIntent(toolName, toolInput),
     delegationCount: delegation.count,
+    completionScope: 'call',
     unboundedDelegation: delegation.unbounded
   };
-  const asyncLaunched = readAsyncLaunched(input, toolInput);
-  if (mutability === 'delegate' && asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
   return {
     protocolVersion: PROTOCOL_VERSION,
     kind: 'action.before',
@@ -71,8 +70,17 @@ function toActionAfterEvent(input, context = {}) {
   const actionId = optionalIdentifier(input && input.toolCallId, input && input.tool_call_id);
   if (!actionId) return null;
   const action = { id: actionId };
-  const asyncLaunched = readAsyncLaunched(input);
-  if (asyncLaunched !== null) action.asyncLaunched = asyncLaunched;
+  const asyncLaunched = readAsyncLaunched(input, input && input.details);
+  action.lifecycle = asyncLaunched === true ? 'running' : 'unknown';
+  // The supported official subagent tool joins its children before returning.
+  // Keep explicitly asynchronous custom variants reserved.
+  if (input.type === 'tool_result' && input.toolName === 'subagent'
+      && Array.isArray(input.content) && typeof input.isError === 'boolean'
+      && ['single', 'parallel', 'chain'].includes(input.details && input.details.mode)
+      && Array.isArray(input.details.results)
+      && asyncLaunched !== true) {
+    action.lifecycle = 'joined';
+  }
   return {
     protocolVersion: PROTOCOL_VERSION,
     kind: 'action.after',

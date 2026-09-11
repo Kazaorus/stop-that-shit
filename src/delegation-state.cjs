@@ -156,7 +156,86 @@ function reservationForAction(state, actionId) {
   return null;
 }
 
+// Callers consume this summary; reservation layout and deduplication stay here.
+function inspectDelegation(state, intent = {}) {
+  const acceptedCount = acceptedActionCount(state, intent.id);
+  const count = intent.delegationCount ?? 0;
+  return {
+    reservedUpperBound: activeDelegationCount(state),
+    unresolvedReasons: [...new Set(Object.values(state && state.unresolved || {}))],
+    unknownResults: Object.values(reservationsOf(state)).filter(value => value.resultUnknown).length,
+    alreadyReserved: acceptedCount !== null && acceptedCount === count,
+    duplicateActionConflict: acceptedCount !== null && acceptedCount !== count
+  };
+}
+
+function bindReportedAliases(state) {
+  let next = state;
+  for (const [id, reservation] of Object.entries(reservationsOf(state))) {
+    if (reservation.completionScope === 'call') continue;
+    for (const alias of reservation.reportedAliases || []) {
+      const agentId = state.agentAliases && state.agentAliases[alias];
+      if (agentId) next = bindSubagent(next, agentId, id);
+    }
+  }
+  return next;
+}
+
+function applyDelegationFact(state, fact) {
+  const actionId = fact.id;
+  const reservationId = reservationForAction(state, actionId);
+  if (fact.kind === 'accepted') {
+    if (acceptedActionCount(state, actionId) !== null) return state;
+    const id = `reservation:${actionId}`;
+    let next = reserveDelegation(state, id, actionId, fact.count);
+    next = { ...next, reservations: { ...next.reservations,
+      [id]: { ...next.reservations[id], completionScope: fact.completionScope || 'children' } } };
+    if (fact.uncertainty) next = { ...next, unresolved: { ...next.unresolved, [actionId]: fact.uncertainty } };
+    return next;
+  }
+  if (fact.kind === 'joined' || fact.kind === 'not_started') {
+    if (!reservationId && !Object.prototype.hasOwnProperty.call(state.unresolved || {}, actionId)) return state;
+    // A late denial cannot contradict an already observed execution.
+    const reservation = reservationsOf(state)[reservationId];
+    if (fact.kind === 'not_started' && reservation && (reservation.observedRunning || reservation.agentIds.length)) return state;
+    const unresolved = { ...state.unresolved };
+    delete unresolved[actionId];
+    return { ...releaseReservation(state, reservationId), unresolved };
+  }
+  if (fact.kind === 'running' || fact.kind === 'unknown') {
+    if (!reservationId) return state;
+    let next = state;
+    if (fact.agentId && state.reservations[reservationId].completionScope !== 'call') {
+      next = bindSubagent(next, fact.agentId, reservationId);
+    }
+    if (fact.agentAliases && next.reservations[reservationId]) {
+      next = { ...next, reservations: { ...next.reservations, [reservationId]: {
+        ...next.reservations[reservationId], reportedAliases: [...new Set(fact.agentAliases)] } } };
+      next = bindReportedAliases(next);
+    }
+    const reservation = next.reservations[reservationId];
+    if (!reservation) return next;
+    return { ...next, reservations: { ...next.reservations,
+      [reservationId]: { ...reservation,
+        observedRunning: reservation.observedRunning || fact.kind === 'running',
+        resultUnknown: fact.kind === 'unknown' } } };
+  }
+  if (fact.kind === 'child_started') {
+    if (fact.agentAlias && fact.agentId) {
+      state = bindReportedAliases({ ...state, agentAliases: { ...state.agentAliases, [fact.agentAlias]: fact.agentId } });
+    }
+    const reservation = reservationsOf(state)[fact.reservationId];
+    if (reservation && reservation.completionScope === 'call') return state;
+    return bindSubagent(state, fact.agentId, fact.reservationId);
+  }
+  if (fact.kind === 'child_stopped') return releaseSubagent(state, fact.agentId);
+  if (fact.kind === 'all_stopped') return { ...clearDelegations(state), unresolved: {} };
+  return state;
+}
+
 module.exports = {
+  inspectDelegation,
+  applyDelegationFact,
   acceptedActionCount,
   activeDelegationCount,
   bindSubagent,

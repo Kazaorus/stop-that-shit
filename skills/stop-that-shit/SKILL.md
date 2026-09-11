@@ -136,14 +136,16 @@ The active delegation limit is a session control:
 $stop-that-shit change agents=N -- Run the task.
 ```
 
-`agents=N` counts concurrently active reservation units. It defaults to
-`Number.MAX_SAFE_INTEGER`, and `0` forbids delegation. Only an explicitly
-synchronous `action.after`, an explicit subagent-stop, or session-end event
-releases active units. Background or unknown-status calls remain reserved until
-a reliable lifecycle event. A batch that exceeds the limit is rejected
-atomically. Migration preserves a valid old `agentBudget`, including `0`.
-Adapters bind lifecycle events only through explicit host identifiers and never
-pair reservations by arrival order.
+`agents=N` limits reserved concurrent capacity. It defaults to unlimited, and
+`0` forbids new delegation. A batch that exceeds the limit is rejected
+atomically. Request parameters do not prove completion: the host must confirm
+that a call did not execute, joined all its children, or ended an associated
+run. Unknown results keep their existing capacity; session-end alone does not
+prove completion. Permitted unbounded or unversioned resume calls remain
+unresolved until matching terminal evidence arrives. With unresolved activity,
+finite Guard requires that evidence or a new host session. Migration preserves
+valid budgets including `0`. Lifecycle association uses explicit host identities,
+never event arrival order.
 
 Claude Code equivalent:
 

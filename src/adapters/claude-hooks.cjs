@@ -9,7 +9,7 @@ const {
   extractAffectedPaths,
   isUnboundedDelegation
 } = require('./claude-tool-classifier.cjs');
-const { optionalIdentifier, readAsyncLaunched } = require('./lifecycle-fields.cjs');
+const { optionalIdentifier } = require('./lifecycle-fields.cjs');
 
 const EVENT_KIND = {
   SessionStart: 'session.start',
@@ -17,8 +17,9 @@ const EVENT_KIND = {
   UserPromptExpansion: 'prompt.submit',
   PreToolUse: 'action.before',
   PostToolUse: 'action.after',
+  PostToolUseFailure: 'action.after',
+  PermissionDenied: 'action.after',
   SubagentStart: 'subagent.start',
-  SubagentStop: 'subagent.stop',
   SessionEnd: 'session.end'
 };
 
@@ -42,15 +43,6 @@ function slashDirective(prompt) {
   return `$stop-that-shit${args ? ` ${args}` : ''}`;
 }
 
-function claudeAsyncLaunched(input) {
-  const response = input && input.tool_response;
-  const status = response && typeof response.status === 'string'
-    ? response.status.toLowerCase()
-    : '';
-  if (status === 'async_launched') return true;
-  if (status === 'completed') return false;
-  return readAsyncLaunched(input, input && input.tool_input, response);
-}
 
 function claudeResponseAgentId(input) {
   const response = input && input.tool_response;
@@ -94,8 +86,10 @@ function toControlEvent(input) {
     };
     const agentId = claudeResponseAgentId(input);
     if (agentId) event.action.agentId = agentId;
-    const asyncLaunched = claudeAsyncLaunched(input);
-    if (asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
+    const status = input.tool_response && input.tool_response.status;
+    event.action.lifecycle = input.hook_event_name === 'PermissionDenied' ? 'not_started'
+      : input.hook_event_name === 'PostToolUseFailure' ? 'unknown'
+      : status === 'completed' ? 'joined' : status === 'async_launched' ? 'running' : 'unknown';
   }
 
   if (kind === 'action.before') {
@@ -113,11 +107,14 @@ function toControlEvent(input) {
       cwd: input.cwd,
       unboundedDelegation: isUnboundedDelegation(input.tool_name)
     };
-    const asyncLaunched = readAsyncLaunched(input, input.tool_input);
-    if (mutability === 'delegate' && asyncLaunched !== null) event.action.asyncLaunched = asyncLaunched;
+    // SendMessage can wake a stopped agent. SubagentStop has no run ID to
+    // distinguish that run's completion from a delayed previous stop.
+    if (input.tool_name === 'SendMessage') event.action.delegationLifecycleUnproven = true;
   }
 
-  if (kind === 'subagent.start' || kind === 'subagent.stop') {
+  // Stop hooks run before other hooks may request continuation, so they do
+  // not prove quiescence. Background calls remain reserved without joined evidence.
+  if (kind === 'subagent.start') {
     event.agentId = optionalIdentifier(input.agent_id, input.agentId);
   }
 
@@ -144,7 +141,7 @@ function fromControlResult(hookEventName, result) {
   }
 
   if (result.kind === 'context') {
-    if (['PostToolUse', 'SubagentStop', 'SessionEnd'].includes(hookEventName)) return null;
+    if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied', 'SubagentStop', 'SessionEnd'].includes(hookEventName)) return null;
     return contextOutput(hookEventName, result.text);
   }
 

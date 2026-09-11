@@ -2,7 +2,7 @@
 
 const nodePath = require('node:path');
 const { DEFAULT_AGENT_LIMIT } = require('./contracts.cjs');
-const { activeDelegationCount } = require('./delegation-state.cjs');
+const { inspectDelegation } = require('./delegation-state.cjs');
 
 function decision(outcome, family, reasonCode, explanation, nextStep) {
   return { outcome, family, reasonCode, explanation, nextStep };
@@ -44,7 +44,7 @@ function pathAllowed(path, allowedPaths, cwd) {
   });
 }
 
-function decide({ contract, action, state = {} }) {
+function decide({ contract, action, state = {}, delegation = inspectDelegation(state.delegation) }) {
   const mode = contract.mode || 'unconfirmed';
   const level = contract.level || 'watch';
 
@@ -63,6 +63,19 @@ function decide({ contract, action, state = {} }) {
 
   if (level === 'off' || mode === 'unconfirmed') {
     return decision('allow', null, 'CONTROL_INACTIVE', 'No confirmed enforcing contract is active.', null);
+  }
+
+  const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
+    ? contract.agentBudget
+    : DEFAULT_AGENT_LIMIT;
+  if (action.legacyDelegationProtocol && agentBudget < DEFAULT_AGENT_LIMIT) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'LIFECYCLE_PROTOCOL_REQUIRED',
+      'This adapter uses the legacy lifecycle protocol, which cannot prove that delegation and resume actions obey the finite limit.',
+      'Update the host adapter and runtime together before using agents=N. Ordinary read and write actions remain available.'
+    );
   }
 
   const nonMutatingMode = ['answer', 'review', 'monitor'].includes(mode);
@@ -161,17 +174,33 @@ function decide({ contract, action, state = {} }) {
     );
   }
 
-  const agentBudget = Number.isSafeInteger(contract.agentBudget) && contract.agentBudget >= 0
-    ? contract.agentBudget
-    : DEFAULT_AGENT_LIMIT;
-  const activeAgents = activeDelegationCount(state.delegation);
+  const activeAgents = delegation.reservedUpperBound;
+  if (action.mutability === 'delegate' && delegation.unresolvedReasons.length > 0
+      && agentBudget < DEFAULT_AGENT_LIMIT) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'DELEGATION_STATE_UNPROVEN',
+      `Earlier permitted activity has no proven bound: ${delegation.unresolvedReasons.join(', ')}.`,
+      'Wait for confirmed completion of the affected call. If the host cannot identify its completion, use a new session for a finite limit.'
+    );
+  }
+  if (action.delegationLifecycleUnproven && agentBudget < DEFAULT_AGENT_LIMIT) {
+    return decision(
+      controlledOutcome(level),
+      'S',
+      'DELEGATION_LIFECYCLE_UNPROVEN',
+      'This action can restart an existing agent, but the host does not identify each run in its completion events.',
+      'Use a new delegation call so agents=N can track its completion. Messaging and resuming remain available without a finite agent limit.'
+    );
+  }
   if (action.mutability === 'delegate' && !action.alreadyReserved && activeAgents + delegationCount > agentBudget) {
     return decision(
       controlledOutcome(level),
       'S',
       'AGENT_BUDGET_EXHAUSTED',
-      `The session allows ${agentBudget} concurrently active subagent(s), with ${activeAgents} active, and this action requires ${delegationCount}.`,
-      'Wait for the current delegation to complete or increase agents=N in a corrected directive.'
+      `The session allows ${agentBudget} concurrently active subagent(s), with ${activeAgents} units reserved, and this action requires ${delegationCount}.`,
+      delegation.unknownResults ? 'A tool returned without proof that its child work ended. Collect a supported completion result before reusing its reserved capacity.' : 'Wait for the current delegation to complete or increase agents=N in a corrected directive.'
     );
   }
 

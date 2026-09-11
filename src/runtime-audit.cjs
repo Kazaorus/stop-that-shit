@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const packageJson = require('../package.json');
 const { PROTOCOL_VERSION } = require('./control-protocol.cjs');
-const { activeDelegationCount } = require('./delegation-state.cjs');
+const { inspectDelegation } = require('./delegation-state.cjs');
 const { readAnnotations } = require('./runtime-annotations.cjs');
 const { appendJsonl, readJsonl, runtimeRoot } = require('./runtime-storage.cjs');
 const { sessionKey } = require('./state.cjs');
@@ -50,7 +50,8 @@ function recordDecision(facts, options = {}) {
       mode: String(contract.mode || 'unconfirmed'),
       level: String(contract.level || 'watch'),
       agentBudget: Number.isSafeInteger(contract.agentBudget) ? contract.agentBudget : Number.MAX_SAFE_INTEGER,
-      activeAgents: activeDelegationCount(delegation),
+      reservedUpperBound: inspectDelegation(delegation).reservedUpperBound,
+      countUnproven: inspectDelegation(delegation).unresolvedReasons.length > 0,
       hashPolicy: String(contract.hashPolicy || 'deny'),
       dependencyPolicy: String(contract.dependencyPolicy || 'ask'),
       allowedPathCount: Array.isArray(contract.allowedPaths) ? contract.allowedPaths.length : 0

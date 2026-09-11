@@ -109,7 +109,7 @@ test('session end clears reservations', () => {
   assert.equal(activeDelegationCount(cleared), 0);
 });
 
-test('readState migrates legacy agent state to schema 3', (t) => {
+test('readState migrates legacy agent state to schema 4', (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-state-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const file = statePath('legacy-session', dataDir);
@@ -130,7 +130,7 @@ test('readState migrates legacy agent state to schema 3', (t) => {
   }));
 
   const state = readState('legacy-session', dataDir);
-  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.schemaVersion, 4);
   assert.equal(state.contract.mode, 'change');
   assert.equal(state.contract.hashPolicy, 'allow');
   assert.deepEqual(state.contract.allowedPaths, ['src/**']);
@@ -140,6 +140,9 @@ test('readState migrates legacy agent state to schema 3', (t) => {
   assert.equal('agentsUsed' in state.contract, false);
   assert.deepEqual(state.delegation.reservations, {});
   assert.deepEqual(state.delegation.agentIdsSeen, []);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).schemaVersion, 1);
+  require('../src/controller.cjs').handleControlEvent({ protocolVersion: 1,
+    kind: 'prompt.submit', sessionId: 'legacy-session', prompt: 'Continue' }, { dataDir });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).delegation.agentIdsSeen, []);
   assert.equal(state.directiveError, null);
   assert.equal(state.directiveWarning, null);
@@ -157,7 +160,7 @@ test('readState preserves a legacy zero agent budget', (t) => {
   }));
 
   const state = readState('legacy-zero', dataDir);
-  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.schemaVersion, 4);
   assert.equal(state.contract.agentBudget, 0);
   assert.equal('totalAgentBudget' in state.contract, false);
   assert.deepEqual(state.delegation.reservations, {});
@@ -197,7 +200,7 @@ test('readState migrates current split state conservatively', (t) => {
   }));
 
   const state = readState('split-session', dataDir);
-  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.schemaVersion, 4);
   assert.equal(state.contract.agentBudget, 0);
   assert.equal(state.delegation.totalAgentsUsed, undefined);
   assert.equal(state.delegation.reservations['reservation:old-call'].pendingCount, 1);

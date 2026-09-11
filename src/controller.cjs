@@ -1,22 +1,12 @@
 'use strict';
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = require('./contracts.cjs');
-const { assertControlEvent } = require('./control-protocol.cjs');
-const {
-  acceptedActionCount,
-  activeDelegationCount,
-  bindSubagent,
-  clearDelegations,
-  markReservationAsync,
-  releaseReservation,
-  releaseSubagent,
-  reserveDelegation,
-  reservationForAction
-} = require('./delegation-state.cjs');
+const { assertControlEvent, PROTOCOL_VERSION } = require('./control-protocol.cjs');
+const { inspectDelegation, applyDelegationFact } = require('./delegation-state.cjs');
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
 const { recordAnnotation } = require('./runtime-annotations.cjs');
-const { readState, withSessionLock, writeState } = require('./state.cjs');
+const { readState, updateSession } = require('./state.cjs');
 
 function none() {
   return { kind: 'none' };
@@ -52,7 +42,7 @@ function contractContext(contract, delegation = {}, phase = 'active', directiveW
 
   return [
     directiveWarning && directiveWarning.message ? `Warning: ${directiveWarning.message}` : null,
-    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${activeDelegationCount(delegation)}/${agentLimit}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
+    `Stop That Shit (${phase}): mode=${contract.mode}; agents=${inspectDelegation(delegation).reservedUpperBound}/${agentLimit} reserved${inspectDelegation(delegation).unresolvedReasons.length ? "; count unproven" : ""}; hash=${contract.hashPolicy || 'deny'}; deps=${contract.dependencyPolicy || 'ask'}; files=${Array.isArray(contract.allowedPaths) ? contract.allowedPaths.join('|') : 'unbounded'}.`,
     'Stop Ladder: Is it requested? Is it necessary? What reachable evidence proves that? Would omission fail the current acceptance?',
     'Report real findings even when implementation is not authorized.',
     'Before expanding scope, name reachable evidence, failure if omitted, and the fact that changes the next action.',
@@ -143,8 +133,7 @@ function handleRuntimeCommand(command, event, state, options) {
   ].join('\n'));
 }
 
-function handlePrompt(event, options) {
-  const state = readState(event.sessionId, options.dataDir);
+function handlePrompt(event, state, options) {
   const command = runtimeCommand(event.prompt);
   if (command) return handleRuntimeCommand(command, event, state, options);
   const parsed = parseContractPrompt(event.prompt, state.contract);
@@ -152,7 +141,6 @@ function handlePrompt(event, options) {
     state.directiveError = parsed.error;
     state.directiveWarning = null;
     state.lastPromptContext = null;
-    writeState(event.sessionId, state, options.dataDir);
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
   }
   state.contract = parsed.contract;
@@ -161,18 +149,21 @@ function handlePrompt(event, options) {
   const promptContext = contractContext(state.contract, state.delegation, 'active', state.directiveWarning);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
-  writeState(event.sessionId, state, options.dataDir);
   return repeatedContext ? none() : context(promptContext);
 }
 
 function handleBeforeAction(event, options) {
-  const evaluate = () => {
-    const state = readState(event.sessionId, options.dataDir);
+  const legacyDelegationProtocol = event.protocolVersion < PROTOCOL_VERSION
+    && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
+  const changesDelegation = event.action.mutability === 'delegate'
+    || event.action.delegationLifecycleUnproven || legacyDelegationProtocol;
+  const evaluate = (state) => {
     const delegationCount = event.action.mutability === 'delegate'
       ? (Number.isInteger(event.action.delegationCount) ? event.action.delegationCount : 1)
       : 0;
     const action = {
       mutability: event.action.mutability,
+      legacyDelegationProtocol,
       delegationCount,
       hashIntent: Boolean(event.action.hashIntent),
       reachability: event.action.reachability,
@@ -181,45 +172,30 @@ function handleBeforeAction(event, options) {
       cwd: event.action.cwd,
       dependencyIntent: Boolean(event.action.dependencyIntent),
       unboundedDelegation: Boolean(event.action.unboundedDelegation),
-      asyncLaunched: event.action.mutability === 'delegate' && typeof event.action.asyncLaunched === 'boolean'
-        ? event.action.asyncLaunched
-        : null
+      delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
     };
-    const existingReservation = event.action.mutability === 'delegate'
-      ? reservationForAction(state.delegation, event.action.id)
-      : null;
-    const acceptedCount = event.action.mutability === 'delegate'
-      ? acceptedActionCount(state.delegation, event.action.id)
-      : null;
-    action.duplicateActionConflict = acceptedCount !== null && acceptedCount !== delegationCount;
-    action.alreadyReserved = !action.duplicateActionConflict
-      && (Boolean(existingReservation) || acceptedCount === delegationCount);
-    const result = decide({ contract: state.contract, action, state });
-
-    if (event.action.mutability === 'delegate' && result.outcome === 'allow') {
-      const actionId = event.action.id;
-      if (!existingReservation) {
-        const reservationId = `reservation:${actionId}`;
-        state.delegation = reserveDelegation(state.delegation, reservationId, actionId, delegationCount);
-        state.delegation = markReservationAsync(state.delegation, reservationId, action.asyncLaunched);
-        writeState(event.sessionId, state, options.dataDir);
-      } else if (typeof action.asyncLaunched === 'boolean') {
-        const nextDelegation = markReservationAsync(state.delegation, existingReservation, action.asyncLaunched);
-        if (nextDelegation !== state.delegation) {
-          state.delegation = nextDelegation;
-          writeState(event.sessionId, state, options.dataDir);
-        }
-      }
+    const summary = inspectDelegation(state.delegation, { id: event.action.id, delegationCount });
+    action.duplicateActionConflict = summary.duplicateActionConflict;
+    action.alreadyReserved = summary.alreadyReserved;
+    const result = decide({ contract: state.contract, action, delegation: summary, state });
+    if (changesDelegation && ['allow', 'report_and_defer'].includes(result.outcome)) {
+      state.delegation = applyDelegationFact(state.delegation, {
+        kind: 'accepted', id: event.action.id || 'legacy:unidentified', count: delegationCount,
+        completionScope: event.action.completionScope,
+        uncertainty: legacyDelegationProtocol ? 'legacy_protocol'
+          : action.unboundedDelegation ? 'unbounded_execution'
+          : action.delegationLifecycleUnproven ? 'unversioned_resume' : null
+      });
     }
     return { state, result };
   };
 
   // Separate host processes can issue independent agent launches close together.
-  // Serialize only delegation reservations so both limits remain real across
-  // separate Hook processes without adding locks to the common fast path.
-  const { state, result } = event.action.mutability === 'delegate'
-    ? withSessionLock(event.sessionId, options.dataDir, evaluate)
-    : evaluate();
+  // Serialize delegation reservations across Hook processes. Prompt updates
+  // and completion handlers use the same lock; pure reads stay unlocked.
+  const { state, result } = changesDelegation
+    ? updateSession(event.sessionId, options.dataDir, evaluate)
+    : evaluate(readState(event.sessionId, options.dataDir));
 
   const denied = result.outcome === 'deny_and_explain' || result.outcome === 'require_user_approval';
   const responseOutcome = denied
@@ -244,57 +220,47 @@ function handleBeforeAction(event, options) {
 }
 
 function handleAfterAction(event, options) {
-  return withSessionLock(event.sessionId, options.dataDir, () => {
-    const state = readState(event.sessionId, options.dataDir);
-    const reservationId = reservationForAction(state.delegation, event.action.id);
-    if (reservationId) {
-      let nextDelegation = state.delegation;
-      if (event.action.agentId) {
-        nextDelegation = bindSubagent(nextDelegation, event.action.agentId, reservationId);
-      }
-      if (typeof event.action.asyncLaunched === 'boolean') {
-        nextDelegation = markReservationAsync(nextDelegation, reservationId, event.action.asyncLaunched);
-      }
-      const reservation = nextDelegation.reservations[reservationId];
-      if (reservation && reservation.asyncLaunched === false) {
-        nextDelegation = releaseReservation(nextDelegation, reservationId);
-      }
-      if (nextDelegation !== state.delegation) {
-        state.delegation = nextDelegation;
-        writeState(event.sessionId, state, options.dataDir);
-      }
+  return updateSession(event.sessionId, options.dataDir, (state) => {
+    // v1 compatibility only accepts explicit completed evidence. A false async
+    // flag can be a request parameter and never proves that children have joined.
+    const kind = event.action.lifecycle || (event.action.completed === true ? 'joined'
+      : event.action.asyncLaunched === true ? 'running' : 'unknown');
+    state.delegation = applyDelegationFact(state.delegation, {
+      kind, id: event.action.id, agentId: event.action.agentId, agentAliases: event.action.agentAliases
+    });
+    for (const agentId of event.action.endedAgentIds || []) {
+      state.delegation = applyDelegationFact(state.delegation, { kind: 'child_stopped', agentId });
     }
     return none();
   });
 }
 
 function handleLifecycleContext(event, options) {
-  const update = () => {
-    const state = readState(event.sessionId, options.dataDir);
-    let nextDelegation = state.delegation;
-    if (event.kind === 'subagent.start' && event.agentId) {
-      nextDelegation = bindSubagent(state.delegation, event.agentId, event.reservationId);
-    } else if (event.kind === 'subagent.stop' && event.agentId) {
-      nextDelegation = releaseSubagent(state.delegation, event.agentId);
-    } else if (event.kind === 'session.end') {
-      nextDelegation = clearDelegations(state.delegation);
-    }
-    if (nextDelegation !== state.delegation) {
-      state.delegation = nextDelegation;
-      writeState(event.sessionId, state, options.dataDir);
-    }
-    return context(contractContext(state.contract, nextDelegation, 'active', state.directiveWarning));
+  // v1 adapters mapped stop attempts to terminal events. They cannot release
+  // reservations made by a v2 adapter in a mixed installation.
+  if (event.protocolVersion < PROTOCOL_VERSION && event.kind !== 'session.start') return none();
+  const update = (state) => {
+    const fact = event.kind === 'subagent.start'
+      ? { kind: 'child_started', agentId: event.agentId, agentAlias: event.agentAlias, reservationId: event.reservationId }
+      : event.kind === 'subagent.stop' ? { kind: 'child_stopped', agentId: event.agentId }
+      : { kind: event.allDelegationsStopped === true ? 'all_stopped' : 'unknown' };
+    state.delegation = applyDelegationFact(state.delegation, fact);
+    return context(contractContext(state.contract, state.delegation, 'active', state.directiveWarning));
   };
-  return ['subagent.start', 'subagent.stop', 'session.end'].includes(event.kind)
-    ? withSessionLock(event.sessionId, options.dataDir, update)
-    : update();
+  return event.kind === 'session.start' ? update(readState(event.sessionId, options.dataDir))
+    : updateSession(event.sessionId, options.dataDir, update);
 }
 
 function handleControlEvent(rawEvent, options = {}) {
-  const event = assertControlEvent(rawEvent);
+  let event = assertControlEvent(rawEvent);
+  if (event.action && event.action.id && event.sourceSessionId && event.sourceSessionId !== event.sessionId) {
+    event = { ...event, action: { ...event.action, id: JSON.stringify([event.sourceSessionId, event.action.id]) } };
+  }
   switch (event.kind) {
     case 'prompt.submit':
-      return handlePrompt(event, options);
+      return runtimeCommand(event.prompt)
+        ? handlePrompt(event, readState(event.sessionId, options.dataDir), options)
+        : updateSession(event.sessionId, options.dataDir, state => handlePrompt(event, state, options));
     case 'action.before':
       return handleBeforeAction(event, options);
     case 'action.after':

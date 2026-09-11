@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { defaultContract } = require('./contracts.cjs');
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 function dataRoot(override) {
   return override || process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA || path.join(os.tmpdir(), 'stop-that-shit-dev');
@@ -28,6 +28,7 @@ function freshState() {
       reservations: {},
       agentIdsSeen: [],
       stoppedAgentIds: [],
+      unresolved: {},
       acceptedActions: {}
     },
     directiveWarning: null,
@@ -64,6 +65,10 @@ function normalizeDelegation(value) {
     for (const [reservationId, reservation] of Object.entries(source.reservations)) {
       if (!reservation || typeof reservation !== 'object') continue;
       reservations[reservationId] = {
+        reportedAliases: Array.isArray(reservation.reportedAliases) ? reservation.reportedAliases.filter(value => typeof value === 'string' && value) : [],
+        completionScope: reservation.completionScope === 'call' ? 'call' : 'children',
+        observedRunning: reservation.observedRunning === true || reservation.asyncLaunched === true,
+        resultUnknown: reservation.resultUnknown === true,
         actionId: typeof reservation.actionId === 'string' ? reservation.actionId : '',
         asyncLaunched: typeof reservation.asyncLaunched === 'boolean' ? reservation.asyncLaunched : null,
         pendingCount: safeCount(reservation.pendingCount),
@@ -90,7 +95,9 @@ function normalizeDelegation(value) {
     stoppedAgentIds: Array.isArray(source.stoppedAgentIds)
       ? [...new Set(source.stoppedAgentIds.filter((agentId) => typeof agentId === 'string' && agentId))]
       : [],
-    acceptedActions
+    acceptedActions,
+    agentAliases: Object.fromEntries(Object.entries(source.agentAliases || {}).filter(([alias, id]) => alias && typeof id === 'string' && id)),
+    unresolved: Object.fromEntries(Object.entries(source.unresolved || {}).filter(([key, reason]) => key && typeof reason === 'string' && reason))
   };
 }
 
@@ -107,6 +114,12 @@ function normalizeState(parsed) {
   delete contract.directiveWarning;
   delete contract.directiveError;
   const delegation = normalizeDelegation(source.delegation);
+  if (source.delegationLifecycleUnproven === true) delegation.unresolved['legacy:unproven'] = 'legacy_history_unverified';
+  // Older versions could erase running work or omit it from the ledger. Even
+  // an empty persisted ledger cannot establish a clean execution history.
+  if (source.schemaVersion === undefined || source.schemaVersion < CURRENT_SCHEMA_VERSION) {
+    delegation.unresolved['legacy:history'] = 'legacy_history_unverified';
+  }
   const directiveWarning = source.directiveWarning && typeof source.directiveWarning === 'object'
     && source.directiveWarning.code !== 'DEPRECATED_AGENT_DIRECTIVE'
     ? source.directiveWarning
@@ -145,31 +158,9 @@ function readState(sessionId, override) {
   const file = statePath(sessionId, override);
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const normalized = normalizeState(parsed);
-    if (!parsed || typeof parsed !== 'object'
-      || parsed.schemaVersion !== CURRENT_SCHEMA_VERSION
-      || !parsed.contract || typeof parsed.contract !== 'object'
-      || !Object.prototype.hasOwnProperty.call(parsed.contract, 'agentBudget')
-      || !validAgentBudget(parsed.contract.agentBudget)
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'totalAgentBudget')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'concurrentAgentBudget')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'agentsUsed')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveWarning')
-      || Object.prototype.hasOwnProperty.call(parsed.contract, 'directiveError')
-      || !parsed.delegation || typeof parsed.delegation !== 'object'
-      || Object.prototype.hasOwnProperty.call(parsed.delegation, 'totalAgentsUsed')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'reservations')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'agentIdsSeen')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'stoppedAgentIds')
-      || !Object.prototype.hasOwnProperty.call(parsed.delegation, 'acceptedActions')
-      || parsed.directiveWarning?.code === 'DEPRECATED_AGENT_DIRECTIVE'
-      || parsed.directiveError?.code === 'LEGACY_AGENT_DIRECTIVE'
-      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveWarning')
-      || !Object.prototype.hasOwnProperty.call(parsed, 'directiveError')
-      || !Object.prototype.hasOwnProperty.call(parsed, 'lastPromptContext')) {
-      writeState(sessionId, normalized, override);
-    }
-    return normalized;
+    // Reads may run without the session lock. Normalize in memory only;
+    // the next locked mutation persists the current schema and latest ledger.
+    return normalizeState(parsed);
   } catch (error) {
     if (error && (error.code === 'ENOENT' || error.name === 'SyntaxError')) return freshState();
     throw error;
@@ -252,7 +243,17 @@ function withSessionLock(sessionId, override, fn, options) {
   }
 }
 
+function updateSession(sessionId, override, update) {
+  return withSessionLock(sessionId, override, () => {
+    const state = readState(sessionId, override);
+    const result = update(state);
+    writeState(sessionId, state, override);
+    return result;
+  });
+}
+
 module.exports = {
+  updateSession,
   acquireSessionLock,
   dataRoot,
   freshState,

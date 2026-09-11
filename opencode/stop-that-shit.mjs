@@ -14,7 +14,7 @@ const {
 } = require('../src/adapters/opencode-hooks.cjs');
 const { contractContext, handleControlEvent } = require('../src/controller.cjs');
 const { parseContractPrompt } = require('../src/contracts.cjs');
-const { readState, writeState } = require('../src/state.cjs');
+const { readState, updateSession } = require('../src/state.cjs');
 
 const CONTEXT_PREFIX = 'Stop That Shit context:';
 const MAX_PROCESSED_MESSAGES = 1024;
@@ -88,7 +88,12 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
   async function handleChildLifecycle(info, kind) {
     const childID = info && (info.id || info.sessionID);
     if (!childID) return;
-    const root = roots.get(childID) || (info.parentID && roots.get(info.parentID));
+    let root = roots.get(childID) || (info.parentID && roots.get(info.parentID));
+    if (!root) {
+      const resolved = await resolveRoot(childID, 'child completion');
+      if (!resolved.certain) return;
+      root = resolved.sessionID;
+    }
     if (!root || root === childID) return;
     const event = kind === 'start'
       ? toSubagentStartEvent({ ...info, id: childID, sessionID: root }, { controlSessionID: root })
@@ -229,13 +234,14 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
   // edit-capable agent while the contract is review, advance the contract to
   // change so the host's build mode and the guard no longer deadlock.
   async function advanceReviewOnEditableAgent(controlSessionID, info) {
-    const state = readState(controlSessionID, dataDir);
-    if (state.contract.mode !== 'review') return false;
+    if (readState(controlSessionID, dataDir).contract.mode !== 'review') return false;
     const agentName = info && info.agent;
     if (!agentName || !(await agentAllowsEdits(agentName))) return false;
-    state.contract = { ...state.contract, mode: 'change', source: 'host' };
-    writeState(controlSessionID, state, dataDir);
-    return true;
+    return updateSession(controlSessionID, dataDir, (state) => {
+      if (state.contract.mode !== 'review') return false;
+      state.contract = { ...state.contract, mode: 'change', source: 'host' };
+      return true;
+    });
   }
 
   async function processUserText(sessionID, info, text) {
@@ -256,7 +262,8 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
         result = null;
       }
     }
-    const active = contractContext(readState(controlSessionID, dataDir).contract);
+    const state = readState(controlSessionID, dataDir);
+    const active = contractContext(state.contract, state.delegation);
     const contextText = result && result.kind === 'context' ? result.text : active;
     await injectContext(controlSessionID, info, contextText);
   }
